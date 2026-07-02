@@ -1,10 +1,16 @@
 # WoW 3.3.5a Server — AzerothCore + Humanlike Playerbots
 
-A private WotLK (3.3.5a, build 12340) server whose world is populated by autonomous
-player bots: they quest, grind, travel between zones, rest at inns, queue for
-battlegrounds and dungeons, upgrade their gear, and chat in-character via a local LLM.
+A private WotLK (3.3.5a, build 12340) server whose world is populated by 500
+autonomous player bots: they quest, grind, travel between zones, rest at inns,
+queue for battlegrounds and dungeons, upgrade their gear, and chat in-character
+via an LLM — with 73 distinct personalities, per-personality talkativeness/voice,
+and relationships that evolve through duels, grouping, and guild life.
 
 Built 2026-07-02 on LMDE 7 (Debian 13 "trixie"), i7-1185G7, 32 GB RAM.
+LLM inference offloads to a second machine (RX 7900 XT) — see `gpu-box/README.md`.
+
+Repo layout: work was developed on branches (`gpu-box`, `ollama-chat-mods`,
+`personalities`, `finetune`) merged into `main`.
 
 ## Stack
 
@@ -98,31 +104,39 @@ defaults; conf = live values). Diff against the dist to see every local change.
 - Bots only chatter near *real* players (`RandomChatterRealPlayerDistance`), so Ollama is
   idle until someone logs in.
 
-## ⚠️ Local patches (uncommitted — survive `git status`, not `git checkout`)
+## ⚠️ Local patches to the nested repos
 
-The fork and the chat module assume Oracle MySQL 8; this box runs MariaDB. Three local
-patches make it work. **They are uncommitted working-tree changes.** After any
-`git pull` / `./build.sh --update`, verify they're still present (`git diff` in
-`azerothcore-wotlk/` and in `modules/mod-ollama-chat/`) before rebuilding:
-
-1. **`src/server/database/Database/MySQLConnection.cpp`** — MariaDB headers report
-   `MYSQL_VERSION_ID = 110806`, tripping MySQL-8-only code paths. Added
-   `!defined(MARIADB_VERSION_ID)` guards around the `MYSQL_OPT_SSL_MODE` block and both
-   `mysql_stmt_bind_named_param` sites (falls back to `MYSQL_OPT_SSL_ENFORCE` /
-   `mysql_stmt_bind_param`). Without this: compile fails.
-2. **`src/server/database/Database/DatabaseWorkerPool.cpp`** — MariaDB Connector/C
-   reports client version 3.x, failing the `>= 8.0` and `client == compiled` fatal checks
-   (wiki error ACE00043/46); also its server-version parser can't read `"11.8.6-MariaDB"`.
-   Added a `LIBMARIADB` branch accepting Connector/C ≥ 3.2.3 and MariaDB server ≥ 10.5.
-   Without this: worldserver aborts at startup.
-3. **`modules/mod-ollama-chat/src/mod-ollama-chat_handler.cpp`** — the chat-history
-   cleanup used `WITH … DELETE`, which MariaDB cannot parse; a failed statement is fatal.
-   Rewritten as `DELETE … JOIN (derived table)`. Without this: worldserver crashes
-   ~45 s after "ready" once bot chat history is pruned.
+The fork and the chat module assume Oracle MySQL 8; this box runs MariaDB. All our
+changes to the nested clones (MariaDB compatibility + the module enhancements below)
+are captured as patch files in **`patches/`** with apply/regenerate instructions.
+After any `git pull` / `./build.sh --update` in the nested repos, re-apply from
+there before rebuilding. See `patches/README.md` for the full change list.
 
 Debugging tip: a worldserver "segfault at 0 … error 6" in `dmesg` is AzerothCore's
 `WPFatal` assertion (a deliberate null write), not memory corruption — the real message
 is in `server/bin/Errors.log`.
+
+## Personalities & relationships (our module extensions)
+
+- **73 personalities** live in `acore_characters.mod_ollama_chat_personality_templates`
+  (33 upstream + 40 from `personalities.sql`). Rows hot-reload with `.ollama reload`.
+- **Per-personality behavior columns** (our addition): `weight` (assignment
+  commonness), `reply_chance_multiplier` (talkativeness — the one-word grunter is
+  0.6×, the LFG spammer 2×), `num_predict_override` (verbosity cap),
+  `temperature_override` (chaos — stoic paladin 0.5, unhinged troll 1.3).
+- **Stable core, evolving relationships**: a bot's personality never changes once
+  assigned; the *sentiment* system (enabled) tracks per-pair relationship scores
+  that shift from chat tone and world events — duels sour a pair, grouping and
+  guild joins warm them (`OllamaChat.SentimentEvent*Adjustment`). Inspect with
+  `.ollama sentiment view <bot> <player>`.
+- New conf key `OllamaChat.RequestTimeout` (HTTP timeout to Ollama, default 120 s).
+
+## GPU box & fine-tuning
+
+`gpu-box/` has numbered scripts for the 7900XT machine: Ollama serving on the LAN
+(Qwen3-4B, 100+ tok/s), then a QLoRA fine-tune pipeline (Unsloth/ROCm) that trains
+the `wow-chat` voice model on the synthetic dataset in `finetune/` and exports it
+back into Ollama. `gpu-box/apply-gpu-config.sh <ip>` flips the realm onto the GPU.
 
 ## Updating
 
