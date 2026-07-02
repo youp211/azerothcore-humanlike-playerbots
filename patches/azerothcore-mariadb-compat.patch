@@ -1,0 +1,90 @@
+diff --git a/src/server/database/Database/DatabaseWorkerPool.cpp b/src/server/database/Database/DatabaseWorkerPool.cpp
+index f539e2a6a..fc75962a6 100644
+--- a/src/server/database/Database/DatabaseWorkerPool.cpp
++++ b/src/server/database/Database/DatabaseWorkerPool.cpp
+@@ -31,6 +31,7 @@
+ #include "SQLOperation.h"
+ #include "Transaction.h"
+ #include "WorldDatabase.h"
++#include <cstdio>
+ #include <limits>
+ #include <mysqld_error.h>
+ #include <sstream>
+@@ -63,8 +64,14 @@ DatabaseWorkerPool<T>::DatabaseWorkerPool() :
+ {
+     WPFatal(mysql_thread_safe(), "Used MySQL library isn't thread-safe.");
+ 
++#if defined(LIBMARIADB) && MARIADB_PACKAGE_VERSION_ID >= 30203
++    // MariaDB Connector/C versions independently of the server (3.x) and stays wire-compatible
++    bool isSupportClientDB = mysql_get_client_version() >= 30203;
++    bool isSameClientDB = true;
++#else
+     bool isSupportClientDB = mysql_get_client_version() >= MIN_MYSQL_CLIENT_VERSION;
+     bool isSameClientDB = mysql_get_client_version() == MYSQL_VERSION_ID;
++#endif
+ 
+     WPFatal(isSupportClientDB, "AzerothCore does not support MySQL versions below 8.0\n\nFound version: {} / {}. Server compiled with: {}.\nSearch the wiki for ACE00043 in Common Errors (https://www.azerothcore.org/wiki/common-errors#ace00043).",
+         mysql_get_client_info(), mysql_get_client_version(), MYSQL_VERSION_ID);
+@@ -390,6 +397,16 @@ void DatabaseWorkerPool<T>::KeepAlive()
+ */
+ bool DatabaseIncompatibleVersion(std::string const mysqlVersion)
+ {
++    // MariaDB reports versions like "11.8.6-MariaDB-..." which the char-based parser
++    // below cannot handle (multi-digit major); require MariaDB 10.5+ explicitly
++    if (mysqlVersion.find("MariaDB") != std::string::npos)
++    {
++        uint32 major = 0;
++        uint32 minor = 0;
++        std::sscanf(mysqlVersion.c_str(), "%u.%u", &major, &minor);
++        return major < 10 || (major == 10 && minor < 5);
++    }
++
+     // anon func to turn a version string into an array of uint8
+     // "1.2.3" => [1, 2, 3]
+     auto parse = [](std::string const& input)
+diff --git a/src/server/database/Database/MySQLConnection.cpp b/src/server/database/Database/MySQLConnection.cpp
+index 48c9c4a62..50a979fdf 100644
+--- a/src/server/database/Database/MySQLConnection.cpp
++++ b/src/server/database/Database/MySQLConnection.cpp
+@@ -129,6 +129,7 @@ uint32 MySQLConnection::Open()
+ 
+     if (m_connectionInfo.ssl != "")
+     {
++#if !defined(MARIADB_VERSION_ID) && MYSQL_VERSION_ID >= 80000
+         mysql_ssl_mode opt_use_ssl = SSL_MODE_DISABLED;
+         if (m_connectionInfo.ssl == "ssl")
+         {
+@@ -136,6 +137,15 @@ uint32 MySQLConnection::Open()
+         }
+ 
+         mysql_options(mysqlInit, MYSQL_OPT_SSL_MODE, (char const*)&opt_use_ssl);
++#else
++        MySQLBool opt_use_ssl = MySQLBool(0);
++        if (m_connectionInfo.ssl == "ssl")
++        {
++            opt_use_ssl = MySQLBool(1);
++        }
++
++        mysql_options(mysqlInit, MYSQL_OPT_SSL_ENFORCE, (char const*)&opt_use_ssl);
++#endif
+     }
+ 
+     m_Mysql = reinterpret_cast<MySQLHandle*>(mysql_real_connect(mysqlInit, m_connectionInfo.host.c_str(), m_connectionInfo.user.c_str(),
+@@ -216,7 +226,7 @@ bool MySQLConnection::Execute(PreparedStatementBase* stmt)
+ 
+     uint32 _s = getMSTime();
+ 
+-#if MYSQL_VERSION_ID >= 80300
++#if !defined(MARIADB_VERSION_ID) && MYSQL_VERSION_ID >= 80300
+     if (mysql_stmt_bind_named_param(msql_STMT, msql_BIND, m_mStmt->GetParameterCount(), nullptr))
+ #else
+     if (mysql_stmt_bind_param(msql_STMT, msql_BIND))
+@@ -268,7 +278,7 @@ bool MySQLConnection::_Query(PreparedStatementBase* stmt, MySQLPreparedStatement
+ 
+     uint32 _s = getMSTime();
+ 
+-#if MYSQL_VERSION_ID >= 80300
++#if !defined(MARIADB_VERSION_ID) && MYSQL_VERSION_ID >= 80300
+     if (mysql_stmt_bind_named_param(msql_STMT, msql_BIND, m_mStmt->GetParameterCount(), nullptr))
+ #else
+     if (mysql_stmt_bind_param(msql_STMT, msql_BIND))

@@ -1,0 +1,749 @@
+diff --git a/conf/mod_ollama_chat.conf.dist b/conf/mod_ollama_chat.conf.dist
+index b600032..f31444f 100644
+--- a/conf/mod_ollama_chat.conf.dist
++++ b/conf/mod_ollama_chat.conf.dist
+@@ -125,6 +125,12 @@ OllamaChat.Seed =
+ #     Default:     0
+ OllamaChat.MaxConcurrentQueries = 0
+ 
++# OllamaChat.RequestTimeout
++#     Description: HTTP timeout in seconds for requests to the Ollama API
++#                  (applies to connection, read and write). Reloadable via .ollama reload.
++#     Default:     120
++OllamaChat.RequestTimeout = 120
++
+ # --------------------------------------------
+ # THINK MODE SUPPORT
+ # --------------------------------------------
+@@ -381,6 +387,17 @@ OllamaChat.EnableRPPersonalities = 0
+ #     Default:     Talk like a standard WoW player.
+ OllamaChat.DefaultPersonalityPrompt = "Speak like a real WoW player from Wrath. Stay in character and use casual in-game tone."
+ 
++# Per-personality behavior columns (DB, not conf):
++# The mod_ollama_chat_personality_templates table (characters DB) supports four
++# behavior columns per personality (added by 2026_07_02_personality_behavior_columns.sql):
++#   weight                  INT   - random-assignment weight (default 100; higher = more common)
++#   reply_chance_multiplier FLOAT - scales reply/ambient-chatter chance rolls (default 1.0;
++#                                   0.5 = talks half as often, 2.0 = twice as often, capped at 100%)
++#   num_predict_override    INT   - per-personality response token cap (NULL/0 = use OllamaChat.NumPredict)
++#   temperature_override    FLOAT - per-personality sampling temperature (NULL = use OllamaChat.Temperature;
++#                                   an explicit value, including 0.0, is always sent)
++# Rows hot-reload with `.ollama reload`.
++
+ # --------------------------------------------
+ # CONVERSATION HISTORY AND SNAPSHOT SYSTEM
+ # --------------------------------------------
+@@ -456,6 +473,14 @@ OllamaChat.SentimentAdjustmentStrength = 0.05
+ # Default: 10
+ OllamaChat.SentimentSaveInterval = 10
+ 
++# Sentiment nudges from world events (only active when EnableSentimentTracking = 1).
++# Applied directly to the mutual sentiment of the pair involved - no LLM call.
++# Set a value to 0 to disable that nudge.
++# Defaults: group 0.02, guild 0.01, duel 0.03
++OllamaChat.SentimentEventGroupAdjustment = 0.02
++OllamaChat.SentimentEventGuildAdjustment = 0.01
++OllamaChat.SentimentEventDuelAdjustment = 0.03
++
+ # Prompt template for sentiment analysis
+ # Use {message} placeholder for the message to analyze
+ # Default: "Analyze the sentiment of this message: \"{message}\". Respond only with: POSITIVE, NEGATIVE, or NEUTRAL."
+diff --git a/data/sql/characters/base/2026_07_02_personality_behavior_columns.sql b/data/sql/characters/base/2026_07_02_personality_behavior_columns.sql
+new file mode 100644
+index 0000000..7ddb619
+--- /dev/null
++++ b/data/sql/characters/base/2026_07_02_personality_behavior_columns.sql
+@@ -0,0 +1,5 @@
++ALTER TABLE `mod_ollama_chat_personality_templates`
++    ADD COLUMN `weight` INT UNSIGNED NOT NULL DEFAULT 100 AFTER `manual_only`,
++    ADD COLUMN `reply_chance_multiplier` FLOAT NOT NULL DEFAULT 1.0 AFTER `weight`,
++    ADD COLUMN `num_predict_override` INT UNSIGNED NULL DEFAULT NULL AFTER `reply_chance_multiplier`,
++    ADD COLUMN `temperature_override` FLOAT NULL DEFAULT NULL AFTER `num_predict_override`;
+diff --git a/src/mod-ollama-chat_api.cpp b/src/mod-ollama-chat_api.cpp
+index 271077d..a4cc11f 100644
+--- a/src/mod-ollama-chat_api.cpp
++++ b/src/mod-ollama-chat_api.cpp
+@@ -22,11 +22,14 @@ std::string ExtractTextBetweenDoubleQuotes(const std::string& response)
+ }
+ 
+ // Function to perform the API call.
+-std::string QueryOllamaAPI(const std::string& prompt)
++std::string QueryOllamaAPI(const std::string& prompt, const OllamaQueryOptions& opts)
+ {
+     // Initialize our custom HTTP client
+     static OllamaHttpClient httpClient;
+-    
++
++    // Applied per call so .ollama reload picks up OllamaChat.RequestTimeout without restart
++    httpClient.SetTimeout(static_cast<int>(g_OllamaRequestTimeout));
++
+     if (!httpClient.IsAvailable())
+     {
+         LOG_ERROR("server.loading", "[OllamaChat] ERROR: HTTP client not available. Check if Ollama service is running and accessible.");
+@@ -54,11 +57,16 @@ std::string QueryOllamaAPI(const std::string& prompt)
+     bool hasOptions = false;
+ 
+     // Only include if set (do not send defaults if user did not set them)
+-    if (g_OllamaNumPredict > 0) {
+-        options["num_predict"] = g_OllamaNumPredict;
++    uint32_t numPredict = opts.numPredictOverride > 0 ? opts.numPredictOverride : g_OllamaNumPredict;
++    if (numPredict > 0) {
++        options["num_predict"] = numPredict;
+         hasOptions = true;
+     }
+-    if (g_OllamaTemperature != 0.8f) {
++    if (opts.temperatureOverride >= 0.0f) {
++        // Per-personality override is always sent, including an explicit 0.0
++        options["temperature"] = opts.temperatureOverride;
++        hasOptions = true;
++    } else if (g_OllamaTemperature != 0.8f) {
+         options["temperature"] = g_OllamaTemperature;
+         hasOptions = true;
+     }
+@@ -234,7 +242,7 @@ bool IsValidAPIResponse(const std::string& response)
+ QueryManager g_queryManager;
+ 
+ // Interface function to submit a query.
+-std::future<std::string> SubmitQuery(const std::string& prompt)
++std::future<std::string> SubmitQuery(const std::string& prompt, const OllamaQueryOptions& opts)
+ {
+-    return g_queryManager.submitQuery(prompt);
++    return g_queryManager.submitQuery(prompt, opts);
+ }
+\ No newline at end of file
+diff --git a/src/mod-ollama-chat_api.h b/src/mod-ollama-chat_api.h
+index 058007f..e9739a0 100644
+--- a/src/mod-ollama-chat_api.h
++++ b/src/mod-ollama-chat_api.h
+@@ -5,13 +5,13 @@
+ #include <future>
+ #include "mod-ollama-chat_querymanager.h"
+ 
+-std::string QueryOllamaAPI(const std::string& prompt);
++std::string QueryOllamaAPI(const std::string& prompt, const OllamaQueryOptions& opts);
+ 
+ // Checks if an API response is valid (not an error message)
+ bool IsValidAPIResponse(const std::string& response);
+ 
+ // Submits a query to the API.
+-std::future<std::string> SubmitQuery(const std::string& prompt);
++std::future<std::string> SubmitQuery(const std::string& prompt, const OllamaQueryOptions& opts = {});
+ 
+ // Declare the global QueryManager variable.
+ extern QueryManager g_queryManager;
+diff --git a/src/mod-ollama-chat_config.cpp b/src/mod-ollama-chat_config.cpp
+index 8bc1b1d..48d712c 100644
+--- a/src/mod-ollama-chat_config.cpp
++++ b/src/mod-ollama-chat_config.cpp
+@@ -5,6 +5,7 @@
+ #include "Log.h"
+ #include "mod-ollama-chat_api.h"
+ #include <fmt/core.h>
++#include <algorithm>
+ #include <sstream>
+ #include <fstream>
+ 
+@@ -56,6 +57,10 @@ std::string g_OllamaSeed = "";
+ // Concurrency/Queueing
+ // --------------------------------------------
+ uint32_t    g_MaxConcurrentQueries = 0;
++uint32_t    g_OllamaRequestTimeout = 120;
++float       g_SentimentEventGroupAdjustment = 0.02f;
++float       g_SentimentEventGuildAdjustment = 0.01f;
++float       g_SentimentEventDuelAdjustment = 0.03f;
+ 
+ // --------------------------------------------
+ // Feature Toggles & Core Settings
+@@ -101,6 +106,8 @@ std::string g_ChatExtraInfoTemplate;
+ // --------------------------------------------
+ std::unordered_map<uint64_t, std::string> g_BotPersonalityList;
+ std::unordered_map<std::string, std::string> g_PersonalityPrompts;
++std::unordered_map<std::string, BotPersonalityTemplate> g_PersonalityTemplates;
++uint32_t g_PersonalityRandomTotalWeight = 0;
+ std::vector<std::string> g_PersonalityKeys;
+ std::vector<std::string> g_PersonalityKeysRandomOnly;
+ std::string g_DefaultPersonalityPrompt;
+@@ -397,6 +404,7 @@ void LoadOllamaChatConfig()
+     g_OllamaSeed                      = sConfigMgr->GetOption<std::string>("OllamaChat.Seed", "");
+ 
+     g_MaxConcurrentQueries            = sConfigMgr->GetOption<uint32_t>("OllamaChat.MaxConcurrentQueries", 0);
++    g_OllamaRequestTimeout            = sConfigMgr->GetOption<uint32_t>("OllamaChat.RequestTimeout", 120);
+ 
+     g_Enable                          = sConfigMgr->GetOption<bool>("OllamaChat.Enable", true);
+     g_DisableRepliesInCombat          = sConfigMgr->GetOption<bool>("OllamaChat.DisableRepliesInCombat", true);
+@@ -484,6 +492,9 @@ void LoadOllamaChatConfig()
+     g_SentimentSaveInterval           = sConfigMgr->GetOption<uint32_t>("OllamaChat.SentimentSaveInterval", 10);
+     g_SentimentAnalysisPrompt         = sConfigMgr->GetOption<std::string>("OllamaChat.SentimentAnalysisPrompt", "Analyze the sentiment of this message: \"{message}\". Respond only with: POSITIVE, NEGATIVE, or NEUTRAL.");
+     g_SentimentPromptTemplate         = sConfigMgr->GetOption<std::string>("OllamaChat.SentimentPromptTemplate", "Your relationship sentiment with {player_name} is {sentiment_value} (0.0=hostile, 0.5=neutral, 1.0=friendly). Use this to guide your tone and response.");
++    g_SentimentEventGroupAdjustment   = sConfigMgr->GetOption<float>("OllamaChat.SentimentEventGroupAdjustment", 0.02f);
++    g_SentimentEventGuildAdjustment   = sConfigMgr->GetOption<float>("OllamaChat.SentimentEventGuildAdjustment", 0.01f);
++    g_SentimentEventDuelAdjustment    = sConfigMgr->GetOption<float>("OllamaChat.SentimentEventDuelAdjustment", 0.03f);
+ 
+     // RAG (Retrieval-Augmented Generation) System
+     g_EnableRAG                       = sConfigMgr->GetOption<bool>("OllamaChat.EnableRAG", false);
+@@ -650,10 +661,30 @@ void LoadOllamaChatConfig()
+ void LoadPersonalityTemplatesFromDB()
+ {
+     g_PersonalityPrompts.clear();
++    g_PersonalityTemplates.clear();
+     g_PersonalityKeys.clear();
+     g_PersonalityKeysRandomOnly.clear();
++    g_PersonalityRandomTotalWeight = 0;
++
++    // Behavior columns arrive via 2026_07_02_personality_behavior_columns.sql; probe so
++    // manually-sourced databases without the migration still load with defaults.
++    bool hasBehaviorColumns = false;
++    if (QueryResult probe = CharacterDatabase.Query(
++            "SELECT COUNT(*) FROM information_schema.COLUMNS "
++            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mod_ollama_chat_personality_templates' AND COLUMN_NAME = 'weight'"))
++    {
++        hasBehaviorColumns = (*probe)[0].Get<uint64_t>() > 0;
++    }
++
++    QueryResult result = hasBehaviorColumns
++        ? CharacterDatabase.Query("SELECT `key`, `prompt`, `manual_only`, `weight`, `reply_chance_multiplier`, `num_predict_override`, `temperature_override` FROM `mod_ollama_chat_personality_templates`")
++        : CharacterDatabase.Query("SELECT `key`, `prompt`, `manual_only` FROM `mod_ollama_chat_personality_templates`");
++
++    if (!hasBehaviorColumns)
++    {
++        LOG_WARN("server.loading", "[Ollama Chat] Personality behavior columns missing - source 2026_07_02_personality_behavior_columns.sql. Using defaults.");
++    }
+ 
+-    QueryResult result = CharacterDatabase.Query("SELECT `key`, `prompt`, `manual_only` FROM `mod_ollama_chat_personality_templates`");
+     if (!result)
+     {
+         LOG_ERROR("server.loading", "[Ollama Chat] No personality templates found in the database!");
+@@ -665,19 +696,32 @@ void LoadPersonalityTemplatesFromDB()
+         std::string key = (*result)[0].Get<std::string>();
+         std::string prompt = (*result)[1].Get<std::string>();
+         bool manualOnly = (*result)[2].Get<bool>();
+-        
++
++        BotPersonalityTemplate tmpl;
++        tmpl.prompt = prompt;
++        tmpl.manualOnly = manualOnly;
++        if (hasBehaviorColumns)
++        {
++            tmpl.weight                = (*result)[3].Get<uint32_t>();
++            tmpl.replyChanceMultiplier = std::max(0.0f, (*result)[4].Get<float>());
++            tmpl.numPredictOverride    = (*result)[5].IsNull() ? 0 : (*result)[5].Get<uint32_t>();
++            tmpl.temperatureOverride   = (*result)[6].IsNull() ? -1.0f : (*result)[6].Get<float>();
++        }
++
+         g_PersonalityPrompts[key] = prompt;
++        g_PersonalityTemplates[key] = tmpl;
+         g_PersonalityKeys.push_back(key);
+-        
++
+         // Only add to random pool if not manual_only
+         if (!manualOnly)
+         {
+             g_PersonalityKeysRandomOnly.push_back(key);
++            g_PersonalityRandomTotalWeight += tmpl.weight;
+         }
+     } while (result->NextRow());
+ 
+-    LOG_INFO("server.loading", "[Ollama Chat] Cached {} personalities ({} available for random assignment).", 
+-             g_PersonalityKeys.size(), g_PersonalityKeysRandomOnly.size());
++    LOG_INFO("server.loading", "[Ollama Chat] Cached {} personalities ({} available for random assignment, total weight {}).",
++             g_PersonalityKeys.size(), g_PersonalityKeysRandomOnly.size(), g_PersonalityRandomTotalWeight);
+ }
+ 
+ void LoadBotConversationHistoryFromDB()
+diff --git a/src/mod-ollama-chat_config.h b/src/mod-ollama-chat_config.h
+index 37e66e2..9d7d290 100644
+--- a/src/mod-ollama-chat_config.h
++++ b/src/mod-ollama-chat_config.h
+@@ -57,6 +57,7 @@ extern std::string g_OllamaSeed;
+ // Concurrency/Queueing
+ // --------------------------------------------
+ extern uint32_t    g_MaxConcurrentQueries;
++extern uint32_t    g_OllamaRequestTimeout;   // HTTP timeout (seconds) for Ollama API requests
+ 
+ // --------------------------------------------
+ // Feature Toggles & Core Settings
+@@ -95,8 +96,20 @@ extern std::string g_ChatExtraInfoTemplate;
+ // --------------------------------------------
+ // Personality and Prompt Data
+ // --------------------------------------------
++struct BotPersonalityTemplate
++{
++    std::string prompt;
++    bool     manualOnly            = false;
++    uint32_t weight                = 100;    // random-assignment weight
++    float    replyChanceMultiplier = 1.0f;   // scales reply/chatter chance rolls
++    uint32_t numPredictOverride    = 0;      // 0 = use global g_OllamaNumPredict
++    float    temperatureOverride   = -1.0f;  // < 0 = use global g_OllamaTemperature
++};
++
+ extern std::unordered_map<uint64_t, std::string> g_BotPersonalityList;
+ extern std::unordered_map<std::string, std::string> g_PersonalityPrompts;
++extern std::unordered_map<std::string, BotPersonalityTemplate> g_PersonalityTemplates;
++extern uint32_t g_PersonalityRandomTotalWeight; // sum of weights of randomly-assignable personalities
+ extern std::vector<std::string> g_PersonalityKeys;
+ extern std::vector<std::string> g_PersonalityKeysRandomOnly; // Personalities that can be randomly assigned
+ extern std::string g_DefaultPersonalityPrompt;
+@@ -224,6 +237,11 @@ extern uint32_t    g_SentimentSaveInterval;              // How often to save se
+ extern std::string g_SentimentAnalysisPrompt;            // Prompt template for sentiment analysis
+ extern std::string g_SentimentPromptTemplate;            // Template for including sentiment in bot prompts
+ 
++// Direct sentiment nudges from world events (no LLM call involved)
++extern float       g_SentimentEventGroupAdjustment;      // joining a group together
++extern float       g_SentimentEventGuildAdjustment;      // joining the same guild
++extern float       g_SentimentEventDuelAdjustment;       // subtracted between duel winner and loser
++
+ // In-memory sentiment storage and mutex
+ extern std::unordered_map<uint64_t, std::unordered_map<uint64_t, float>> g_BotPlayerSentiments;
+ extern std::mutex g_SentimentMutex;
+diff --git a/src/mod-ollama-chat_events.cpp b/src/mod-ollama-chat_events.cpp
+index a1eb690..1b0d293 100644
+--- a/src/mod-ollama-chat_events.cpp
++++ b/src/mod-ollama-chat_events.cpp
+@@ -6,6 +6,7 @@
+ #include "mod-ollama-chat_personality.h"
+ #include "mod-ollama-chat_sentiment.h"
+ #include "Player.h"
++#include "Group.h"
+ #include "ObjectAccessor.h"
+ #include "Guild.h"
+ #include "PlayerbotAI.h"
+@@ -301,7 +302,7 @@ void OllamaBotEventChatter::QueueEvent(Player* bot, std::string type, std::strin
+             std::string prompt = BuildPrompt(botPtr, g_EventChatterPromptTemplate, type, detail, actorName);
+             if (prompt.empty()) return;
+ 
+-            std::string response = QueryOllamaAPI(prompt);
++            std::string response = QueryOllamaAPI(prompt, GetPersonalityQueryOptions(botPtr));
+             if (response.empty())
+             {
+                 if (g_DebugEnabled)
+@@ -613,6 +614,8 @@ void ChatOnDuel::OnPlayerDuelEnd(Player* winner, Player* loser, DuelCompleteType
+     {
+         return;
+     }
++    // Duels breed rivalry: mutual sentiment drops between the two
++    NudgeSentimentPair(winner, loser, -g_SentimentEventDuelAdjustment);
+     eventChatter.DispatchGameEvent(winner, g_EventTypeWonDuel, loser->GetName());
+ }
+ 
+@@ -667,9 +670,26 @@ ChatOnGuildMemberChange::ChatOnGuildMemberChange() : PlayerScript("ChatOnGuildMe
+ 
+ void ChatOnGuildMemberChange::OnGuildMemberJoin(Player* player, Guild* /*guild*/)
+ {
+-    if (!player || !player->GetGuild() || !g_EnableGuildEventChatter)
++    if (!player || !player->GetGuild())
+         return;
+-        
++
++    // Guildmates warm to the newcomer (and vice versa)
++    if (g_EnableSentimentTracking && g_SentimentEventGuildAdjustment != 0.0f)
++    {
++        ObjectGuid::LowType guildId = player->GetGuildId();
++        for (auto const& itr : ObjectAccessor::GetPlayers())
++        {
++            Player* member = itr.second;
++            if (member && member != player && member->IsInWorld() && member->GetGuildId() == guildId)
++            {
++                NudgeSentimentPair(player, member, g_SentimentEventGuildAdjustment);
++            }
++        }
++    }
++
++    if (!g_EnableGuildEventChatter)
++        return;
++
+     if (!g_GuildEventTypeGuildJoin.empty())
+         eventChatter.DispatchGameEvent(player, g_GuildEventTypeGuildJoin, player->GetGuild()->GetName());
+ }
+@@ -713,3 +733,27 @@ void ChatOnGuildMemberChange::OnGuildMemberLogin(Player* player, Guild* guild)
+         eventChatter.DispatchGameEvent(player, g_GuildEventTypeGuildLogin, guild->GetName());
+ }
+ 
++SentimentOnGroup::SentimentOnGroup() : GroupScript("SentimentOnGroup") {}
++
++void SentimentOnGroup::OnAddMember(Group* group, ObjectGuid guid)
++{
++    if (!group || !g_EnableSentimentTracking || g_SentimentEventGroupAdjustment == 0.0f)
++        return;
++
++    Player* newMember = ObjectAccessor::FindPlayer(guid);
++    if (!newMember)
++        return;
++
++    // Grouping together warms mutual sentiment with every existing member
++    for (auto const& slot : group->GetMemberSlots())
++    {
++        if (slot.guid == guid)
++            continue;
++
++        if (Player* member = ObjectAccessor::FindPlayer(slot.guid))
++        {
++            NudgeSentimentPair(newMember, member, g_SentimentEventGroupAdjustment);
++        }
++    }
++}
++
+diff --git a/src/mod-ollama-chat_events.h b/src/mod-ollama-chat_events.h
+index 3387db3..0fc098f 100644
+--- a/src/mod-ollama-chat_events.h
++++ b/src/mod-ollama-chat_events.h
+@@ -91,5 +91,13 @@ public:
+     void OnGuildMemberLogin(Player* player, Guild* guild);
+ };
+ 
++// Nudges mutual sentiment when players/bots group together
++class SentimentOnGroup : public GroupScript
++{
++public:
++    SentimentOnGroup();
++    void OnAddMember(Group* group, ObjectGuid guid) override;
++};
++
+ 
+ #endif // MOD_OLLAMA_CHAT_EVENTS_H
+diff --git a/src/mod-ollama-chat_handler.cpp b/src/mod-ollama-chat_handler.cpp
+index cc89b9f..98fb0f0 100644
+--- a/src/mod-ollama-chat_handler.cpp
++++ b/src/mod-ollama-chat_handler.cpp
+@@ -286,8 +286,10 @@ void SaveBotConversationHistoryToDB()
+     }
+ 
+     // Cleanup: keep only the N most recent entries per bot/player pair
++    // MariaDB does not support WITH ... DELETE; join a materialized derived table instead
+     std::string cleanupQuery = R"SQL(
+-        WITH ranked_history AS (
++        DELETE h FROM mod_ollama_chat_history h
++        JOIN (
+             SELECT
+                 bot_guid,
+                 player_guid,
+@@ -297,13 +299,11 @@ void SaveBotConversationHistoryToDB()
+                     ORDER BY timestamp DESC
+                 ) as rn
+             FROM mod_ollama_chat_history
+-        )
+-        DELETE FROM mod_ollama_chat_history
+-        WHERE (bot_guid, player_guid, timestamp) IN (
+-            SELECT bot_guid, player_guid, timestamp
+-            FROM ranked_history
+-            WHERE rn > {}
+-        );
++        ) ranked
++          ON ranked.bot_guid = h.bot_guid
++         AND ranked.player_guid = h.player_guid
++         AND ranked.timestamp = h.timestamp
++        WHERE ranked.rn > {};
+     )SQL";
+     CharacterDatabase.Execute(SafeFormat(cleanupQuery, g_MaxConversationHistory));
+ }
+@@ -1336,18 +1336,20 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
+                     }
+                     continue;
+                 }
++                float personalityMult = GetPersonalityReplyChanceMultiplier(GetBotPersonality(bot));
++                uint32_t effChance = std::min<uint32_t>(100u, static_cast<uint32_t>(chance * personalityMult + 0.5f));
+                 uint32_t roll = urand(0, 99);
+-                if (roll < chance)
++                if (roll < effChance)
+                 {
+                     finalCandidates.push_back(bot);
+                     if(g_DebugEnabled)
+                     {
+-                        LOG_INFO("server.loading", "[Ollama Chat] Bot {} PASSED chance roll ({} < {}%)", bot->GetName(), roll, chance);
++                        LOG_INFO("server.loading", "[Ollama Chat] Bot {} PASSED chance roll ({} < {}%)", bot->GetName(), roll, effChance);
+                     }
+                 }
+                 else if(g_DebugEnabled)
+                 {
+-                    LOG_INFO("server.loading", "[Ollama Chat] Bot {} FAILED chance roll ({} >= {}%)", bot->GetName(), roll, chance);
++                    LOG_INFO("server.loading", "[Ollama Chat] Bot {} FAILED chance roll ({} >= {}%)", bot->GetName(), roll, effChance);
+                 }
+             }
+         }
+@@ -1410,11 +1412,12 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
+         }
+         std::string prompt = GenerateBotPrompt(bot, msg, player);
+         uint64_t botGuid = bot->GetGUID().GetRawValue();
+-        
+-        std::thread([botGuid, senderGuid, prompt, sourceLocal, channelId = (channel ? channel->GetChannelId() : 0), channelName = (channel ? channel->GetName() : ""), msg]() {
++        OllamaQueryOptions queryOpts = GetPersonalityQueryOptions(bot);
++
++        std::thread([botGuid, senderGuid, prompt, queryOpts, sourceLocal, channelId = (channel ? channel->GetChannelId() : 0), channelName = (channel ? channel->GetName() : ""), msg]() {
+             try {
+                 // Use the QueryManager to submit the query.
+-                auto responseFuture = SubmitQuery(prompt);
++                auto responseFuture = SubmitQuery(prompt, queryOpts);
+                 if (!responseFuture.valid())
+                 {
+                     return;
+diff --git a/src/mod-ollama-chat_httpclient.h b/src/mod-ollama-chat_httpclient.h
+index ec51274..8d24ac5 100644
+--- a/src/mod-ollama-chat_httpclient.h
++++ b/src/mod-ollama-chat_httpclient.h
+@@ -1,6 +1,7 @@
+ #ifndef OLLAMA_HTTP_CLIENT_H
+ #define OLLAMA_HTTP_CLIENT_H
+ 
++#include <atomic>
+ #include <string>
+ 
+ class OllamaHttpClient
+@@ -19,7 +20,7 @@ public:
+     bool IsAvailable() const;
+ 
+ private:
+-    int m_timeout;
++    std::atomic<int> m_timeout;  // written per call from worker threads
+     bool m_available;
+ };
+ 
+diff --git a/src/mod-ollama-chat_main.cpp b/src/mod-ollama-chat_main.cpp
+index 9c1a141..0fb318e 100644
+--- a/src/mod-ollama-chat_main.cpp
++++ b/src/mod-ollama-chat_main.cpp
+@@ -23,5 +23,7 @@ void Addmod_ollama_chatScripts()
+     new ChatOnLevelUp();
+     new ChatOnAchievement();
+     new ChatOnGameObjectUse();
++    new ChatOnGuildMemberChange();
++    new SentimentOnGroup();
+     new OllamaChatConfigCommand();
+ }
+diff --git a/src/mod-ollama-chat_personality.cpp b/src/mod-ollama-chat_personality.cpp
+index 34eb2d2..50f1367 100644
+--- a/src/mod-ollama-chat_personality.cpp
++++ b/src/mod-ollama-chat_personality.cpp
+@@ -56,9 +56,23 @@ std::string GetBotPersonality(Player* bot)
+         return dbPersonality;
+     }
+ 
+-    // Otherwise, assign randomly from config (only from non-manual personalities)
+-    uint32 newIdx = urand(0, g_PersonalityKeysRandomOnly.size() - 1);
+-    std::string chosenPersonality = g_PersonalityKeysRandomOnly[newIdx];
++    // Otherwise, assign randomly from config (only from non-manual personalities),
++    // weighted by the template's `weight` column (uniform fallback when all weights are 0)
++    std::string chosenPersonality = g_PersonalityKeysRandomOnly[urand(0, g_PersonalityKeysRandomOnly.size() - 1)];
++    if (g_PersonalityRandomTotalWeight > 0)
++    {
++        uint32 roll = urand(1, g_PersonalityRandomTotalWeight);
++        for (auto const& key : g_PersonalityKeysRandomOnly)
++        {
++            uint32 w = g_PersonalityTemplates[key].weight;
++            if (roll <= w)
++            {
++                chosenPersonality = key;
++                break;
++            }
++            roll -= w;
++        }
++    }
+     g_BotPersonalityList[botGuid] = chosenPersonality;
+ 
+     // Save to database if schema supports string (recommend TEXT or VARCHAR column for personality)
+@@ -137,3 +151,26 @@ void ClearAllBotPersonalities()
+         LOG_INFO("server.loading", "[Ollama Chat] Cleared all bot personality assignments due to RP personalities being disabled");
+     }
+ }
++
++float GetPersonalityReplyChanceMultiplier(const std::string& personality)
++{
++    auto it = g_PersonalityTemplates.find(personality);
++    if (it != g_PersonalityTemplates.end())
++        return it->second.replyChanceMultiplier;
++    return 1.0f;
++}
++
++OllamaQueryOptions GetPersonalityQueryOptions(Player* bot)
++{
++    OllamaQueryOptions opts;
++    if (!bot)
++        return opts;
++
++    auto it = g_PersonalityTemplates.find(GetBotPersonality(bot));
++    if (it != g_PersonalityTemplates.end())
++    {
++        opts.numPredictOverride  = it->second.numPredictOverride;
++        opts.temperatureOverride = it->second.temperatureOverride;
++    }
++    return opts;
++}
+diff --git a/src/mod-ollama-chat_personality.h b/src/mod-ollama-chat_personality.h
+index ec861f8..e6004cd 100644
+--- a/src/mod-ollama-chat_personality.h
++++ b/src/mod-ollama-chat_personality.h
+@@ -5,6 +5,7 @@
+ #include <string>
+ #include <cstdint>
+ #include <vector>
++#include "mod-ollama-chat_querymanager.h" // OllamaQueryOptions
+ 
+ class Player; // forward declaration
+ 
+@@ -28,4 +29,10 @@ bool PersonalityExists(const std::string& personality);
+ // Clear all personality assignments (used when RP personalities are disabled)
+ void ClearAllBotPersonalities();
+ 
++// Reply-chance multiplier for a personality key (1.0 when unknown/default)
++float GetPersonalityReplyChanceMultiplier(const std::string& personality);
++
++// Per-call Ollama options (num_predict/temperature overrides) for the bot's personality
++OllamaQueryOptions GetPersonalityQueryOptions(Player* bot);
++
+ #endif // MOD_OLLAMA_CHAT_PERSONALITY_H
+diff --git a/src/mod-ollama-chat_querymanager.cpp b/src/mod-ollama-chat_querymanager.cpp
+index 870a88b..dd65bbe 100644
+--- a/src/mod-ollama-chat_querymanager.cpp
++++ b/src/mod-ollama-chat_querymanager.cpp
+@@ -15,7 +15,7 @@ void QueryManager::setMaxConcurrentQueries(int maxQueries) {
+ }
+ 
+ // Submit a query and return a future for the result.
+-std::future<std::string> QueryManager::submitQuery(const std::string& prompt) {
++std::future<std::string> QueryManager::submitQuery(const std::string& prompt, const OllamaQueryOptions& opts) {
+     std::promise<std::string> promise;
+     std::future<std::string> future = promise.get_future();
+ 
+@@ -27,20 +27,20 @@ std::future<std::string> QueryManager::submitQuery(const std::string& prompt) {
+             ++currentQueries;
+             shouldRunNow = true;
+         } else {
+-            taskQueue.push({ prompt, std::move(promise) });
++            taskQueue.push({ prompt, opts, std::move(promise) });
+         }
+     }
+ 
+     if (shouldRunNow) {
+-        std::thread(&QueryManager::processQuery, this, prompt, std::move(promise)).detach();
++        std::thread(&QueryManager::processQuery, this, prompt, opts, std::move(promise)).detach();
+     }
+ 
+     return future;
+ }
+ 
+ // Process the query by calling the API and then handling any queued tasks.
+-void QueryManager::processQuery(const std::string& prompt, std::promise<std::string> promise) {
+-    std::string result = QueryOllamaAPI(prompt);
++void QueryManager::processQuery(const std::string& prompt, OllamaQueryOptions opts, std::promise<std::string> promise) {
++    std::string result = QueryOllamaAPI(prompt, opts);
+     promise.set_value(result);
+ 
+     {
+@@ -50,7 +50,7 @@ void QueryManager::processQuery(const std::string& prompt, std::promise<std::str
+             QueryTask task = std::move(taskQueue.front());
+             taskQueue.pop();
+             ++currentQueries;
+-            std::thread(&QueryManager::processQuery, this, task.prompt, std::move(task.promise)).detach();
++            std::thread(&QueryManager::processQuery, this, task.prompt, task.opts, std::move(task.promise)).detach();
+         }
+     }
+ }
+diff --git a/src/mod-ollama-chat_querymanager.h b/src/mod-ollama-chat_querymanager.h
+index c491157..f3b5855 100644
+--- a/src/mod-ollama-chat_querymanager.h
++++ b/src/mod-ollama-chat_querymanager.h
+@@ -7,21 +7,28 @@
+ #include <queue>
+ #include <thread>
+ 
+-std::string QueryOllamaAPI(const std::string& prompt);
++// Per-call overrides for the Ollama request; defaults defer to the global conf values.
++struct OllamaQueryOptions {
++    uint32_t numPredictOverride  = 0;     // 0 = use global g_OllamaNumPredict
++    float    temperatureOverride = -1.0f; // < 0 = use global g_OllamaTemperature
++};
++
++std::string QueryOllamaAPI(const std::string& prompt, const OllamaQueryOptions& opts = {});
+ 
+ class QueryManager {
+ public:
+     QueryManager();
+     void setMaxConcurrentQueries(int maxQueries);
+-    std::future<std::string> submitQuery(const std::string& prompt);
++    std::future<std::string> submitQuery(const std::string& prompt, const OllamaQueryOptions& opts = {});
+ 
+ private:
+     struct QueryTask {
+         std::string prompt;
++        OllamaQueryOptions opts;
+         std::promise<std::string> promise;
+     };
+ 
+-    void processQuery(const std::string& prompt, std::promise<std::string> promise);
++    void processQuery(const std::string& prompt, OllamaQueryOptions opts, std::promise<std::string> promise);
+ 
+     int maxConcurrentQueries; // 0 means no limit
+     int currentQueries;
+diff --git a/src/mod-ollama-chat_random.cpp b/src/mod-ollama-chat_random.cpp
+index 0715971..52f06b2 100644
+--- a/src/mod-ollama-chat_random.cpp
++++ b/src/mod-ollama-chat_random.cpp
+@@ -150,7 +150,9 @@ void OllamaBotRandomChatter::HandleRandomChatter()
+             if (now < nextRandomChatTime[guid])
+                 continue;
+ 
+-            if(urand(0, 99) >= g_RandomChatterBotCommentChance)
++            float personalityMult = GetPersonalityReplyChanceMultiplier(GetBotPersonality(bot));
++            uint32_t effChatterChance = std::min<uint32_t>(100u, static_cast<uint32_t>(g_RandomChatterBotCommentChance * personalityMult + 0.5f));
++            if(urand(0, 99) >= effChatterChance)
+                 continue;
+ 
+             std::string environmentInfo;
+@@ -706,14 +708,15 @@ void OllamaBotRandomChatter::HandleRandomChatter()
+             }
+ 
+             uint64_t botGuid = bot->GetGUID().GetRawValue();
++            OllamaQueryOptions queryOpts = GetPersonalityQueryOptions(bot);
+ 
+-            std::thread([botGuid, prompt, isGuildComment]() {
++            std::thread([botGuid, prompt, queryOpts, isGuildComment]() {
+                 try {
+                     Player* botPtr = ObjectAccessor::FindPlayer(ObjectGuid(botGuid));
+                     if (!botPtr) return;
+-                    
++
+                     // Generate response from LLM
+-                    std::string response = QueryOllamaAPI(prompt);
++                    std::string response = QueryOllamaAPI(prompt, queryOpts);
+                     if (response.empty())
+                     {
+                         if (g_DebugEnabled)
+diff --git a/src/mod-ollama-chat_sentiment.cpp b/src/mod-ollama-chat_sentiment.cpp
+index d420593..1be617b 100644
+--- a/src/mod-ollama-chat_sentiment.cpp
++++ b/src/mod-ollama-chat_sentiment.cpp
+@@ -48,6 +48,19 @@ void SetBotPlayerSentiment(uint64_t botGuid, uint64_t playerGuid, float sentimen
+     }
+ }
+ 
++void NudgeSentimentPair(Player* a, Player* b, float delta)
++{
++    if (!g_EnableSentimentTracking || !a || !b || a == b || delta == 0.0f)
++        return;
++
++    uint64_t aGuid = a->GetGUID().GetRawValue();
++    uint64_t bGuid = b->GetGUID().GetRawValue();
++
++    // Symmetric: adjust each side's view of the other (clamping happens in the setter)
++    SetBotPlayerSentiment(aGuid, bGuid, GetBotPlayerSentiment(aGuid, bGuid) + delta);
++    SetBotPlayerSentiment(bGuid, aGuid, GetBotPlayerSentiment(bGuid, aGuid) + delta);
++}
++
+ float AnalyzeMessageSentiment(const std::string& message)
+ {
+     if (!g_EnableSentimentTracking || message.empty())
+diff --git a/src/mod-ollama-chat_sentiment.h b/src/mod-ollama-chat_sentiment.h
+index 678b578..a95d98c 100644
+--- a/src/mod-ollama-chat_sentiment.h
++++ b/src/mod-ollama-chat_sentiment.h
+@@ -40,6 +40,12 @@ float AnalyzeMessageSentiment(const std::string& message);
+  */
+ void UpdateBotPlayerSentiment(Player* bot, Player* player, const std::string& message);
+ 
++/**
++ * Directly nudge the mutual sentiment between two players/bots by delta (no LLM call).
++ * Used by world-event hooks (grouping, guild joins, duels). No-op when tracking is disabled.
++ */
++void NudgeSentimentPair(Player* a, Player* b, float delta);
++
+ /**
+  * Get sentiment prompt addition for including in bot responses
+  * @param bot The bot
