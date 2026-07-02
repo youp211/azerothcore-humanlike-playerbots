@@ -1,0 +1,17 @@
+# Nested git clones (the fork + modules live in their own repos; our changes
+# to them are captured as patch files under patches/)
+azerothcore-wotlk/
+
+# Runtime install: binaries, configs with passwords, 5GB of client data, logs
+server/
+
+# Build & install logs
+*.log
+
+# Fine-tune artifacts (datasets are generated; models are huge)
+finetune/output/
+finetune/*.gguf
+
+__pycache__/
+*.pyc
+*.pyo

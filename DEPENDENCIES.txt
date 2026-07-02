@@ -1,0 +1,42 @@
+# Dependencies — AzerothCore WotLK 3.3.5a + mod-playerbots + mod-ollama-chat
+# Target: LMDE 7 (Debian 13 "trixie" base)
+
+## apt packages
+# install with: sudo apt install -y $(grep -E '^[a-z]' DEPENDENCIES.txt | tr '\n' ' ')
+git
+cmake
+make
+gcc
+g++
+clang
+libssl-dev
+libbz2-dev
+libreadline-dev
+libncurses-dev
+libboost-all-dev
+mariadb-server
+mariadb-client
+libmariadb-dev
+default-libmysqlclient-dev
+libfmt-dev
+unzip
+curl
+tmux
+
+## Notes on specific packages
+# default-libmysqlclient-dev — provides mysql_config for AzerothCore's CMake FindMySQL on Debian
+# libfmt-dev                 — required by mod-ollama-chat
+# clang                      — recommended compiler for the Playerbot fork (gcc 14 occasionally breaks)
+
+## External (not apt)
+# Ollama:        curl -fsSL https://ollama.com/install.sh | sh
+# Ollama models: ollama pull llama3.2:3b   (primary chat model, ~2 GB)
+#                ollama pull llama3.2:1b   (fast fallback, ~1.3 GB)
+# Client data:   https://github.com/wowgaming/client-data/releases/download/v19/Data.zip (~1.2 GB)
+#                unzip into server/data/ -> Cameras/ dbc/ maps/ mmaps/ vmaps/
+# WoW client:    3.3.5a build 12340 enUS (user-provided; needed only to play, not to run the server)
+
+## Source repositories (cloned by build.sh)
+# https://github.com/liyunfan1223/azerothcore-wotlk  branch: Playerbot   (custom core fork — REQUIRED)
+# https://github.com/liyunfan1223/mod-playerbots     branch: master      (into modules/)
+# https://github.com/DustinHendrickson/mod-ollama-chat                   (into modules/)
