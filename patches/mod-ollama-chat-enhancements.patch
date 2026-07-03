@@ -831,6 +831,227 @@ index 0000000..0ec0bd0
 +{
 +    new OllamaChatCompletionMailScript();
 +}
+diff --git a/src/mod-ollama-chat_guildnames.cpp b/src/mod-ollama-chat_guildnames.cpp
+new file mode 100644
+index 0000000..bf2332a
+--- /dev/null
++++ b/src/mod-ollama-chat_guildnames.cpp
+@@ -0,0 +1,215 @@
++// mod-ollama-chat_guildnames.cpp
++//
++// LLM-generated guild names. When mod-playerbots forms a personality-themed
++// bot guild it starts with a static themed name; right after formation it calls
++// OllamaChat_RenameGuildInVoice (via a weak symbol) so the bot LEADER's
++// personality can invent a better, in-voice name through the local LLM. The
++// generation is fully async and never blocks guild formation.
++//
++// Thread-safety: the LLM query and string sanitizing run on a detached worker
++// thread, which only reads (SubmitQuery, name lookups) and enqueues a result.
++// The actual guild rename touches core guild state, so it is deferred to the
++// world thread: the worker pushes a pending entry, and OllamaChatGuildNameWorldScript::
++// OnUpdate drains the queue and applies renames on the world thread.
++
++#include "mod-ollama-chat_api.h"
++#include "mod-ollama-chat_config.h"
++#include "mod-ollama-chat_personality.h"
++
++#include "Config.h"
++#include "Guild.h"
++#include "GuildMgr.h"
++#include "Log.h"
++#include "ObjectMgr.h"
++#include "Player.h"
++#include "ScriptMgr.h"
++
++#include "PlayerbotAI.h"
++#include "PlayerbotMgr.h"
++
++#include <fmt/core.h>
++#include <algorithm>
++#include <cctype>
++#include <mutex>
++#include <string>
++#include <thread>
++#include <vector>
++
++namespace
++{
++    struct PendingGuildRename
++    {
++        uint32 guildId;
++        std::string name;
++        std::string leaderName;
++    };
++
++    // Worker thread pushes here; the world-thread WorldScript below drains it.
++    std::mutex g_GuildNameQueueMutex;
++    std::vector<PendingGuildRename> g_GuildNameQueue;
++
++    // Turn a raw model response into a clean, single-line guild name: keep only
++    // the first line, strip surrounding whitespace/quotes/punctuation, collapse
++    // internal whitespace runs, and hard-cap at the WoW client's 24-char limit.
++    // Title-casing is intentionally not applied.
++    std::string SanitizeGuildName(std::string s)
++    {
++        // Some models prefix ("Sure! ") or append an explanation on a new line;
++        // keep only the first line.
++        if (size_t nl = s.find_first_of("\r\n"); nl != std::string::npos)
++            s = s.substr(0, nl);
++
++        auto isEdgeJunk = [](unsigned char c) -> bool
++        {
++            return std::isspace(c) || c == '"' || c == '\'' || c == '.' || c == ',' || c == '!' ||
++                   c == '?' || c == ':' || c == ';' || c == '`' || c == '*' || c == '(' || c == ')' ||
++                   c == '[' || c == ']' || c == '-' || c == '_';
++        };
++
++        size_t begin = 0;
++        size_t end = s.size();
++        while (begin < end && isEdgeJunk(static_cast<unsigned char>(s[begin])))
++            ++begin;
++        while (end > begin && isEdgeJunk(static_cast<unsigned char>(s[end - 1])))
++            --end;
++        s = s.substr(begin, end - begin);
++
++        // Collapse internal whitespace runs to a single space.
++        std::string out;
++        out.reserve(s.size());
++        bool prevSpace = false;
++        for (char ch : s)
++        {
++            if (std::isspace(static_cast<unsigned char>(ch)))
++            {
++                if (!prevSpace && !out.empty())
++                    out.push_back(' ');
++                prevSpace = true;
++            }
++            else
++            {
++                out.push_back(ch);
++                prevSpace = false;
++            }
++        }
++
++        // WoW client guild-name limit is 24 characters; do not leave a dangling
++        // space after a hard cut.
++        if (out.size() > 24)
++        {
++            out.resize(24);
++            while (!out.empty() && std::isspace(static_cast<unsigned char>(out.back())))
++                out.pop_back();
++        }
++
++        return out;
++    }
++}  // namespace
++
++// ---------------------------------------------------------------------------
++// Weak-symbol entry point called from mod-playerbots (same binary) right after
++// a personality guild is formed. Fire-and-forget: async, never blocks the
++// caller. Non-static so the weak extern in PersonalityGuildFactory.cpp binds.
++// ---------------------------------------------------------------------------
++void OllamaChat_RenameGuildInVoice(Player* leader, uint32 guildId, std::string const& archetype)
++{
++    if (!g_Enable || !leader || !guildId)
++        return;
++
++    if (!sConfigMgr->GetOption<bool>("OllamaChat.EnableGuildNameGen", true))
++        return;
++
++    PlayerbotAI* botAI = PlayerbotsMgr::instance().GetPlayerbotAI(leader);
++    if (!botAI)
++        return;
++
++    std::string personality       = GetBotPersonality(leader);
++    std::string personalityPrompt = GetPersonalityPromptAddition(personality);
++    std::string botClass =
++        botAI->GetChatHelper() ? botAI->GetChatHelper()->FormatClass(leader->getClass()) : "adventurer";
++    std::string leaderName        = leader->GetName();
++
++    std::string prompt = fmt::format(
++        "You're a Wrath-era WoW player. Name: {}, a level {} {}. "
++        "MAKE SURE YOU RESPOND USING YOUR PERSONALITY, WHICH IS: {}: {}. "
++        "You just founded a {} guild. Invent its name: a memorable 2008-era WoW guild name, "
++        "2 to 4 words, plain text, no quotes, nothing else.",
++        leaderName, leader->GetLevel(), botClass, personality, personalityPrompt, archetype);
++
++    // Nudge temperature up a touch so guild names come out more varied/creative
++    // than ordinary chat lines.
++    OllamaQueryOptions opts = GetPersonalityQueryOptions(leader);
++    float baseTemp = (opts.temperatureOverride >= 0.0f) ? opts.temperatureOverride : g_OllamaTemperature;
++    opts.temperatureOverride = std::min(baseTemp + 0.15f, 1.5f);
++
++    std::thread([guildId, prompt, opts, leaderName]()
++    {
++        try
++        {
++            std::future<std::string> fut = SubmitQuery(prompt, opts);
++            if (!fut.valid())
++                return;
++
++            std::string name = SanitizeGuildName(fut.get());
++            if (name.size() < 3)  // empty or too short to be a real guild name
++                return;
++            if (sObjectMgr->IsReservedName(name) || sObjectMgr->IsProfanityName(name))
++                return;
++            if (sGuildMgr->GetGuildByName(name))  // taken already: keep the themed name
++                return;
++
++            std::lock_guard<std::mutex> lock(g_GuildNameQueueMutex);
++            g_GuildNameQueue.push_back(PendingGuildRename{guildId, std::move(name), leaderName});
++        }
++        catch (...)
++        {
++        }
++    }).detach();
++}
++
++// ---------------------------------------------------------------------------
++// Drains pending renames on the world thread and applies them via the same
++// sequence the ".guild rename" command uses (uniqueness check + Guild::SetName,
++// which validates the name and persists it to the characters DB).
++// ---------------------------------------------------------------------------
++class OllamaChatGuildNameWorldScript : public WorldScript
++{
++public:
++    OllamaChatGuildNameWorldScript() : WorldScript("OllamaChatGuildNameWorldScript") { }
++
++    void OnUpdate(uint32 /*diff*/) override
++    {
++        std::vector<PendingGuildRename> pending;
++        {
++            std::lock_guard<std::mutex> lock(g_GuildNameQueueMutex);
++            if (g_GuildNameQueue.empty())
++                return;
++            pending.swap(g_GuildNameQueue);
++        }
++
++        for (PendingGuildRename const& entry : pending)
++        {
++            Guild* guild = sGuildMgr->GetGuildById(entry.guildId);
++            if (!guild)
++                continue;
++
++            // Re-check uniqueness on the world thread: another guild could have
++            // taken the name between the worker's check and now.
++            if (sGuildMgr->GetGuildByName(entry.name))
++                continue;
++
++            if (!guild->SetName(entry.name))
++                continue;
++
++            LOG_INFO("server.loading", "[Ollama Chat] [GuildName] renamed guild {} -> '{}' (leader {})",
++                     entry.guildId, entry.name, entry.leaderName);
++        }
++    }
++};
++
++// Registration entry point. Call this from Addmod_ollama_chatScripts() in
++// mod-ollama-chat_main.cpp (see the registration note reported to the user).
++void AddSC_mod_ollama_chat_guildnames()
++{
++    new OllamaChatGuildNameWorldScript();
++}
 diff --git a/src/mod-ollama-chat_handler.cpp b/src/mod-ollama-chat_handler.cpp
 index cc89b9f..e12ee6b 100644
 --- a/src/mod-ollama-chat_handler.cpp
@@ -1285,10 +1506,10 @@ index ec51274..8d24ac5 100644
  };
  
 diff --git a/src/mod-ollama-chat_main.cpp b/src/mod-ollama-chat_main.cpp
-index 9c1a141..b84868e 100644
+index 9c1a141..13b504e 100644
 --- a/src/mod-ollama-chat_main.cpp
 +++ b/src/mod-ollama-chat_main.cpp
-@@ -23,5 +23,13 @@ void Addmod_ollama_chatScripts()
+@@ -23,5 +23,15 @@ void Addmod_ollama_chatScripts()
      new ChatOnLevelUp();
      new ChatOnAchievement();
      new ChatOnGameObjectUse();
@@ -1301,6 +1522,8 @@ index 9c1a141..b84868e 100644
 +    AddSC_mod_ollama_chat_events_mail();
 +    void AddSC_mod_ollama_chat_memory();
 +    AddSC_mod_ollama_chat_memory();
++    void AddSC_mod_ollama_chat_guildnames();
++    AddSC_mod_ollama_chat_guildnames();
  }
 diff --git a/src/mod-ollama-chat_memory.cpp b/src/mod-ollama-chat_memory.cpp
 new file mode 100644

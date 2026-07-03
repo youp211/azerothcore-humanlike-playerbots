@@ -176,15 +176,23 @@ def make_gear_context(rng, player):
     # mirror GenerateGearContext in mod-ollama-chat_handler.cpp)
     item, kind = None, "weak"
     r2 = rng.random()
-    if r2 < 0.12:
+    if r2 < 0.08:
         item = rng.choice(GEAR_ITEMS[armor_class_for(player["class"], player["level"])])
         ctx += f" You just mailed them your {item} as a gift - tell them to check their mailbox."
         kind = "gift"
-    elif r2 < 0.17:
+    elif r2 < 0.11:
         item = rng.choice(GEAR_ITEMS[armor_class_for(player["class"], player["level"])])
         ctx += (f" You just mailed them your {item} with a {rng.randint(1, 30)} silver COD"
                 f" - tell them to check their mailbox and pay up.")
         kind = "cod"
+    elif r2 < 0.19:
+        item = rng.choice(GEAR_ITEMS[armor_class_for(player["class"], player["level"])])
+        ctx += f" You have a {item} for them - tell them to open trade with you and you'll hand it over."
+        kind = "park_gift"
+    elif r2 < 0.23:
+        item = rng.choice(GEAR_ITEMS[armor_class_for(player["class"], player["level"])])
+        ctx += f" You have a {item} for them - tell them to open trade with you to buy it for {rng.randint(1, 30)} silver."
+        kind = "park_cod"
     ctx += ")"
     return ctx, kind, slot, stat, item
 
@@ -259,6 +267,10 @@ GENERIC = {
                  "check your mail, {item} inside. costs a few silver", "sent the {item} COD. business is business"],
     "gear_good": ["nice gear man", "yeah youre set, no notes", "solid setup honestly",
                   "cant teach you anything about gearing lol", "geared. respect"],
+    "gear_park_gift": ["got a {item} for you, open trade", "trade me, ill hand you a {item}",
+                       "hold up, i have a {item} for you. trade window", "open trade, got something for your {slot}"],
+    "gear_park_cod": ["selling a {item} if you want it, trade me", "got a {item}, few silver and its yours. trade window",
+                      "open trade if you want this {item}, cheap"],
 }
 
 BANKS = {
@@ -290,6 +302,7 @@ BANKS = {
         "smalltalk": ["everything here wants to eat me", "is it normal to be this broke lol"],
     },
     "GRUMPY_VETERAN": {
+        "pricing": ["worth more than your whole set. 5 silver", "in my day this cost a week of farming. 10s"],
         "greeting": ["yeah hi", "what do you want", "hm."],
         "hows_it_going": ["same grind, different decade", "itd go faster if people stopped talking to me"],
         "class_advice": ["people asked this exact question in 2005. answer hasnt changed", "read your talents. all of them."],
@@ -299,6 +312,7 @@ BANKS = {
         "smalltalk": ["zone was better before the patch", "back when dungeons meant something"],
     },
     "TRADE_COMEDIAN": {
+        "pricing": ["one million gold or one (1) good joke", "for you? a modest fortune"],
         "greeting": ["ah my favorite audience member", "welcome to the show"],
         "trade": ["ill pay in exposure and one (1) murloc eye", "thats not a price thats a war crime"],
         "insult": ["sir this is a wendys... i mean goldshire inn", "ill have you know im undefeated in /duel jokes"],
@@ -314,6 +328,7 @@ BANKS = {
         "smalltalk": ["A fine day to serve the Light.", "Every road teaches, if you listen."],
     },
     "UNHINGED_TROLL": {
+        "pricing": ["priced in murloc eyes. seven", "the price is a secret the fish keep"],
         "greeting": ["the fish are listening. act normal", "you ever notice hogger never blinks"],
         "hows_it_going": ["grinding? brother i am ASCENDING", "the xp bar is a government construct"],
         "class_advice": ["unspec everything. pure instinct build", "put all points in fishing. trust"],
@@ -322,6 +337,7 @@ BANKS = {
         "duel": ["only if we both fight blindfolded", "duels are rigged by big bandage"],
     },
     "WOW_MOM": {
+        "pricing": ["Oh just take it, sweetie, no charge!", "A hug and we call it even!"],
         "greeting": ["Hi sweetie! How are you doing today?", "Hello there! Nice to see a friendly face!"],
         "hows_it_going": ["Oh lovely, thank you for asking! Have you eaten?", "Slow and steady! No rush at my age haha"],
         "insult": ["Now that wasn't very nice, was it?", "I'll pretend I didn't read that, dear."],
@@ -403,6 +419,7 @@ BANKS = {
         "duel": ["If steel must speak, let it speak with respect.", "I accept, as travelers once did — to first yield."],
     },
     "EGIRL": {
+        "pricing": ["for uuu? like 2 silver n a compliment hehe", "pay me in emotes cutie xD"],
         "greeting": ["hiii cutie ^_^", "omg haiii~", "heyyy bestie hehe"],
         "hows_it_going": ["so bored~ entertain me hehe", "just vibing n dying to mobs xD"],
         "compliment": ["omggg ty ty uwu", "stoppp ur making me blush hehe"],
@@ -441,6 +458,7 @@ GEAR_BANKS = {
         "gear_good": ["Look at YOU, all geared up! So proud!", "Oh my, fancy armor! Well done sweetie!"],
     },
     "CHILL_DAD": {
+        "pricing": ["couple silver, whatever man", "first ones free, thats the dad rule"],
         "gear_advice": ["that {slot} carried you this far but yeah, upgrade time", "grab some {stat} gear when you can, no rush"],
         "gear_gift": ["mailed you the {item} kiddo, no charge. pay it forward", "check your mail, the {item} is yours"],
         "gear_good": ["clean setup. take care of it", "nothing to add, looking sharp"],
@@ -625,8 +643,9 @@ def gen_chat_example(rng):
         gear_ctx, gkind, gslot, gstat, gitem = make_gear_context(rng, player)
         gear_ctx += " "
         # mailed an item -> ALWAYS acknowledge it; otherwise react 65% of the time
-        gcat = {"gift": "gear_gift", "cod": "gear_cod", "weak": "gear_advice"}.get(gkind, "gear_good")
-        must_react = gkind in ("gift", "cod")
+        gcat = {"gift": "gear_gift", "cod": "gear_cod", "park_gift": "gear_park_gift",
+                "park_cod": "gear_park_cod", "weak": "gear_advice"}.get(gkind, "gear_good")
+        must_react = gkind in ("gift", "cod", "park_gift", "park_cod")
         if must_react or (rng.random() < 0.65 and sent_kind != "hostile"):
             gbank = GEAR_BANKS.get(pkey, {})
             greplies = gbank.get(gcat) or GENERIC[gcat]
@@ -669,6 +688,48 @@ def gen_random_chatter_example(rng):
     return {"messages": [{"role": "user", "content": prompt}, {"role": "assistant", "content": reply}]}
 
 
+
+# ---------------------------------------------------------------------------
+# Guild-name generation examples ({guild_name} intent) - user turn mirrors
+# OllamaChat_RenameGuildInVoice in mod-ollama-chat_guildnames.cpp exactly.
+# ---------------------------------------------------------------------------
+
+GUILDNAME_TEMPLATE = ("You're a Wrath-era WoW player. Name: {bot_name}, a level {bot_level} {bot_class}. "
+                      "MAKE SURE YOU RESPOND USING YOUR PERSONALITY, WHICH IS: {pkey}: {ptext}. "
+                      "You just founded a {archetype} guild. Invent its name: a memorable 2008-era WoW guild name, "
+                      "2 to 4 words, plain text, no quotes, nothing else.")
+
+GUILD_NAME_BANKS = {
+    "HARDCORE_RAIDLEAD": ["Server First Or Wipe", "Mandatory Attendance", "Consumables Ready", "No Casuals Allowed"],
+    "THEORYCRAFTER": ["Optimal Rotation", "Stat Weights United", "Simulated Victory", "The Spreadsheet"],
+    "MIN_MAXER": ["Strictly Optimal", "Zero Waste Runs", "Best In Slot"],
+    "LORE_NERD": ["Keepers of Lore", "The Sundering Scholars", "Archive of Azeroth"],
+    "ELITE_ARENA_PVPER": ["Gladiator Or Bust", "Twenty Two Hundred", "Rating Farmers", "Trinket Bait"],
+    "PVP_TRASHTALKER": ["Free Honor Kills", "Talk Is Cheap", "Graveyard Campers"],
+    "DUELIST": ["First Blood Elite", "Outside Orgrimmar", "The Duelists Code"],
+    "RAGER": ["Blind Fury", "Keyboard Smashers", "Anger Issues"],
+    "WOW_MOM": ["The Cozy Hearth", "Family Dinner Table", "Warm Meals Guild", "Hugs And Heals"],
+    "MENTOR": ["The Patient Blade", "Guiding Light", "Lessons Learned"],
+    "GUILD_RECRUITER": ["Always Recruiting", "Join Us Today", "Open Invitations"],
+    "CHILL_DAD": ["Weekend Warriors", "Dad Reflexes", "After The Kids Sleep"],
+    "JOLLY_BEER_LOVER": ["Brews And Battles", "The Thirsty Kodo", "One More Round"],
+    "HEROIC_LEADER": ["Banner Of Dawn", "Stand Together", "The Rallying Cry"],
+}
+GUILD_NAME_GENERIC = ["Azeroth Wanderers", "The Barrens Crew", "Midnight Raiders", "Crossroads Company"]
+GUILD_ARCHETYPES = {"raid": ["HARDCORE_RAIDLEAD", "THEORYCRAFTER", "MIN_MAXER", "LORE_NERD"],
+                    "pvp": ["ELITE_ARENA_PVPER", "PVP_TRASHTALKER", "DUELIST", "RAGER"],
+                    "casual": ["WOW_MOM", "MENTOR", "GUILD_RECRUITER", "CHILL_DAD", "JOLLY_BEER_LOVER", "HEROIC_LEADER"]}
+
+def gen_guild_name_example(rng):
+    archetype = rng.choice(list(GUILD_ARCHETYPES))
+    pkey = rng.choice(GUILD_ARCHETYPES[archetype])
+    ptext = P.get(pkey, ("You lead a guild.", set()))[0]
+    bot = make_actor(rng)
+    prompt = GUILDNAME_TEMPLATE.format(bot_name=bot["name"], bot_level=max(bot["level"], 10),
+                                       bot_class=bot["class"], pkey=pkey, ptext=ptext, archetype=archetype)
+    name = rng.choice(GUILD_NAME_BANKS.get(pkey, GUILD_NAME_GENERIC))
+    return {"messages": [{"role": "user", "content": prompt}, {"role": "assistant", "content": name}]}
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=5000)
@@ -682,7 +743,8 @@ def main():
 
     seen, rows = set(), []
     while len(rows) < args.n:
-        ex = gen_random_chatter_example(rng) if rng.random() < 0.25 else gen_chat_example(rng)
+        r = rng.random()
+        ex = gen_guild_name_example(rng) if r < 0.03 else (gen_random_chatter_example(rng) if r < 0.28 else gen_chat_example(rng))
         key = (ex["messages"][0]["content"][:120], ex["messages"][1]["content"])
         if key in seen:
             continue

@@ -1189,10 +1189,10 @@ index dfbe1f96..0750915c 100644
              engine->addStrategiesNoInit("boost", "racials", "chat", "default", "aoe", "potions", "cast time", "dps assist", nullptr);
 diff --git a/src/Bot/Factory/PersonalityGuildFactory.cpp b/src/Bot/Factory/PersonalityGuildFactory.cpp
 new file mode 100644
-index 00000000..d4581227
+index 00000000..79854647
 --- /dev/null
 +++ b/src/Bot/Factory/PersonalityGuildFactory.cpp
-@@ -0,0 +1,350 @@
+@@ -0,0 +1,365 @@
 +/*
 + * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license, you may redistribute it
 + * and/or modify it under version 3 of the License, or (at your option), any later version.
@@ -1218,6 +1218,17 @@ index 00000000..d4581227
 +#include <unordered_map>
 +#include <unordered_set>
 +#include <vector>
++
++// Provided by mod-ollama-chat (same binary): right after a personality guild is
++// formed, have the bot LEADER's personality invent a better guild name via the
++// local LLM and rename the guild asynchronously. Weakly optional - if the chat
++// module is disabled the call is a no-op stub below.
++[[gnu::weak]] void OllamaChat_RenameGuildInVoice(Player* leader, uint32 guildId, std::string const& archetype);
++static void SpeakGuildName(Player* leader, uint32 guildId, std::string const& archetype)
++{
++    if (OllamaChat_RenameGuildInVoice)
++        OllamaChat_RenameGuildInVoice(leader, guildId, archetype);
++}
 +
 +namespace
 +{
@@ -1467,6 +1478,8 @@ index 00000000..d4581227
 +
 +        LOG_INFO("playerbots", "[PersonalityGuild] Formed {} guild '{}' led by {} ({}) with {} members",
 +                 ArchetypeName(archetype), name, leaderPlayer->GetName(), leader.personality, memberCount);
++        if (guild)
++            SpeakGuildName(leaderPlayer, guild->GetId(), ArchetypeName(archetype));
 +        return true;
 +    };
 +
@@ -1522,6 +1535,8 @@ index 00000000..d4581227
 +
 +        LOG_INFO("playerbots", "[PersonalityGuild] Formed casual guild '{}' led by {} ({}) with {} members", name,
 +                 leaderPlayer->GetName(), leader.personality, memberCount);
++        if (guild)
++            SpeakGuildName(leaderPlayer, guild->GetId(), ArchetypeName(GuildArchetype::Casual));
 +        return true;
 +    };
 +
