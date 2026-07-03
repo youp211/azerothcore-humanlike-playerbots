@@ -429,10 +429,19 @@ index 3387db3..0fc098f 100644
  
  #endif // MOD_OLLAMA_CHAT_EVENTS_H
 diff --git a/src/mod-ollama-chat_handler.cpp b/src/mod-ollama-chat_handler.cpp
-index cc89b9f..98fb0f0 100644
+index cc89b9f..0e475b3 100644
 --- a/src/mod-ollama-chat_handler.cpp
 +++ b/src/mod-ollama-chat_handler.cpp
-@@ -286,8 +286,10 @@ void SaveBotConversationHistoryToDB()
+@@ -12,6 +12,8 @@
+ #include "ObjectAccessor.h"
+ #include "World.h"
+ #include "AiFactory.h"
++#include "Bag.h"
++#include "ItemTemplate.h"
+ #include "ChannelMgr.h"
+ #include <sstream>
+ #include <vector>
+@@ -286,8 +288,10 @@ void SaveBotConversationHistoryToDB()
      }
  
      // Cleanup: keep only the N most recent entries per bot/player pair
@@ -444,7 +453,7 @@ index cc89b9f..98fb0f0 100644
              SELECT
                  bot_guid,
                  player_guid,
-@@ -297,13 +299,11 @@ void SaveBotConversationHistoryToDB()
+@@ -297,13 +301,11 @@ void SaveBotConversationHistoryToDB()
                      ORDER BY timestamp DESC
                  ) as rn
              FROM mod_ollama_chat_history
@@ -463,7 +472,7 @@ index cc89b9f..98fb0f0 100644
      )SQL";
      CharacterDatabase.Execute(SafeFormat(cleanupQuery, g_MaxConversationHistory));
  }
-@@ -1336,18 +1336,20 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
+@@ -1336,18 +1338,20 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
                      }
                      continue;
                  }
@@ -487,7 +496,7 @@ index cc89b9f..98fb0f0 100644
                  }
              }
          }
-@@ -1410,11 +1412,12 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
+@@ -1410,11 +1414,12 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
          }
          std::string prompt = GenerateBotPrompt(bot, msg, player);
          uint64_t botGuid = bot->GetGUID().GetRawValue();
@@ -503,6 +512,158 @@ index cc89b9f..98fb0f0 100644
                  if (!responseFuture.valid())
                  {
                      return;
+@@ -1797,8 +1802,140 @@ static bool IsBotEligibleForChatChannelLocal(Player* bot, Player* player, ChatCh
+     }
+ }
+ 
++// WotLK-era stat shorthand the bots use when talking gear
++static char const* ClassPrimaryStat(uint8 playerClass)
++{
++    switch (playerClass)
++    {
++        case CLASS_WARRIOR:
++        case CLASS_PALADIN:
++        case CLASS_DEATH_KNIGHT: return "strength";
++        case CLASS_HUNTER:
++        case CLASS_ROGUE:        return "agility";
++        case CLASS_DRUID:
++        case CLASS_SHAMAN:       return "agility or spellpower";
++        default:                 return "intellect and spellpower";
++    }
++}
++
++// Highest armor subclass the class wears at this level
++static uint32 MaxArmorSubclass(uint8 playerClass, uint8 level)
++{
++    switch (playerClass)
++    {
++        case CLASS_WARRIOR:
++        case CLASS_PALADIN:
++        case CLASS_DEATH_KNIGHT: return level >= 40 ? ITEM_SUBCLASS_ARMOR_PLATE : ITEM_SUBCLASS_ARMOR_MAIL;
++        case CLASS_HUNTER:
++        case CLASS_SHAMAN:       return level >= 40 ? ITEM_SUBCLASS_ARMOR_MAIL : ITEM_SUBCLASS_ARMOR_LEATHER;
++        case CLASS_ROGUE:
++        case CLASS_DRUID:        return ITEM_SUBCLASS_ARMOR_LEATHER;
++        default:                 return ITEM_SUBCLASS_ARMOR_CLOTH;
++    }
++}
++
++// "Inspect" context for the {gear_context} placeholder: the player's weakest
++// armor slot plus, if the bot actually carries a tradeable class-appropriate
++// upgrade for them, that item - so gear offers reference real inventory.
++// How the bot USES this (helpful offer, sales pitch, or mockery) is left to
++// its personality prompt.
++static std::string GenerateGearContext(Player* bot, Player* player)
++{
++    static char const* slotNames[EQUIPMENT_SLOT_END] = {
++        "head", "neck", "shoulders", "shirt", "chest", "waist", "legs", "feet", "wrists", "hands",
++        "ring", "ring", "trinket", "trinket", "cloak", "main hand", "off hand", "ranged", "tabard"};
++
++    uint32 worstIlvl = 0xFFFFFFFF;
++    uint8 worstSlot = 255;
++    uint32 epicCount = 0;
++    uint32 resilienceCount = 0;
++    bool hasSetPiece = false;
++    for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
++    {
++        switch (slot)
++        {
++            case EQUIPMENT_SLOT_HEAD: case EQUIPMENT_SLOT_SHOULDERS: case EQUIPMENT_SLOT_CHEST:
++            case EQUIPMENT_SLOT_WAIST: case EQUIPMENT_SLOT_LEGS: case EQUIPMENT_SLOT_FEET:
++            case EQUIPMENT_SLOT_WRISTS: case EQUIPMENT_SLOT_HANDS: case EQUIPMENT_SLOT_BACK:
++                break;
++            default:
++                continue; // armor slots only - weapons/jewelry are another conversation
++        }
++        Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
++        uint32 ilvl = item ? item->GetTemplate()->ItemLevel : 0;
++        if (ilvl < worstIlvl)
++        {
++            worstIlvl = ilvl;
++            worstSlot = slot;
++        }
++        if (item)
++        {
++            ItemTemplate const* proto = item->GetTemplate();
++            if (proto->Quality >= ITEM_QUALITY_EPIC)
++                ++epicCount;
++            if (proto->ItemSet)
++                hasSetPiece = true;
++            for (uint32 s = 0; s < proto->StatsCount; ++s)
++                if (proto->ItemStat[s].ItemStatType == ITEM_MOD_RESILIENCE_RATING && proto->ItemStat[s].ItemStatValue > 0)
++                {
++                    ++resilienceCount;
++                    break;
++                }
++        }
++    }
++    if (worstSlot == 255)
++        return "";
++
++    // Well-geared players get recognition, not upgrade nagging - a 2008 player
++    // would know raid sets and PvP gear on sight.
++    if (worstIlvl > 0 && worstIlvl >= player->GetLevel())
++    {
++        if (resilienceCount >= 4)
++            return fmt::format("(You inspected {}: they are wearing serious PvP resilience gear - not someone to lecture about gear.)",
++                               player->GetName());
++        if (epicCount >= 5)
++            return fmt::format("(You inspected {}: they are decked in epic raid gear{} - nothing you carry comes close.)",
++                               player->GetName(), hasSetPiece ? ", set pieces and all" : "");
++        return fmt::format("(You inspected {}: their gear is solid for their level - no weak spots worth mentioning.)",
++                           player->GetName());
++    }
++
++    Item* offer = nullptr;
++    uint32 maxSub = MaxArmorSubclass(player->getClass(), player->GetLevel());
++    auto consider = [&](Item* item)
++    {
++        if (!item || item->IsSoulBound())
++            return;
++        ItemTemplate const* proto = item->GetTemplate();
++        if (proto->Class != ITEM_CLASS_ARMOR || proto->SubClass == ITEM_SUBCLASS_ARMOR_MISC ||
++            proto->SubClass > maxSub)
++            return;
++        if (proto->RequiredLevel > player->GetLevel() || proto->ItemLevel <= worstIlvl + 1)
++            return;
++        if (!offer || proto->ItemLevel > offer->GetTemplate()->ItemLevel)
++            offer = item;
++    };
++    for (uint8 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
++        consider(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i));
++    for (uint8 b = INVENTORY_SLOT_BAG_START; b < INVENTORY_SLOT_BAG_END; ++b)
++        if (Bag* bag = bot->GetBagByPos(b))
++            for (uint32 s = 0; s < bag->GetBagSize(); ++s)
++                consider(bag->GetItemByPos(s));
++
++    std::string ctx = fmt::format(
++        "(You inspected {}: their weakest piece is the {} ({}). As a class they want {}.",
++        player->GetName(), slotNames[worstSlot],
++        worstIlvl == 0 ? std::string("empty") : fmt::format("item level {}", worstIlvl),
++        ClassPrimaryStat(player->getClass()));
++    if (offer)
++        ctx += fmt::format(" In your bags: {} (item level {}) - you could offer or sell it to them.",
++                           offer->GetTemplate()->Name1, offer->GetTemplate()->ItemLevel);
++    ctx += ")";
++    return ctx;
++}
++
+ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* player)
+-{  
++{
+     if (!bot || !player) {
+         return "";
+     }
+@@ -1906,7 +2043,8 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
+         fmt::arg("player_message", playerMessage),
+         fmt::arg("extra_info", extraInfo),
+         fmt::arg("chat_history", chatHistory),
+-        fmt::arg("sentiment_info", sentimentInfo)
++        fmt::arg("sentiment_info", sentimentInfo),
++        fmt::arg("gear_context", GenerateGearContext(bot, player))
+     );
+ 
+     // Add RAG information to the prompt if available
 diff --git a/src/mod-ollama-chat_httpclient.h b/src/mod-ollama-chat_httpclient.h
 index ec51274..8d24ac5 100644
 --- a/src/mod-ollama-chat_httpclient.h

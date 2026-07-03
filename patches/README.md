@@ -41,8 +41,40 @@ cd ../mod-playerbots && git diff > ../../../patches/mod-playerbots-playstyles.pa
 - Playstyle column migration (`2026_07_03_personality_playstyle.sql`): adds
   `playstyle` to the personality templates + maps the upstream 33 personalities
   (the 40 custom ones are mapped in `personalities.sql`)
+- Gear-inspect context (2026-07-03): `{gear_context}` prompt placeholder —
+  the bot "inspects" the player it talks to: weakest armor slot + class stat
+  priority + a real tradeable upgrade from the bot's own bags if it has one;
+  well-geared players get recognition context instead (epic raid set /
+  PvP resilience / solid-for-level) so bots don't nag geared players. How the
+  bot uses it (gift, sales pitch, mockery, respect) is personality-driven and
+  baked into the wow-chat fine-tune (see finetune/)
 
-**mod-playerbots-playstyles.patch** — per-personality gameplay:
+**mod-playerbots-playstyles.patch** — per-personality gameplay + arena coordination:
+
+*Arena team coordination (2026-07-03):*
+- `arena kill target` value: deterministic team-wide focus target (healers
+  first, then lowest health, guid-ordered ties + bucketed health so all
+  members agree without messaging); a real player on the team overrides it by
+  just attacking — bots assist the human's target
+- `arena focus` trigger + `attack arena kill target` action wired into
+  `ArenaStrategy`: the whole team stays on the called target
+- Synchronized burst: `boost` (burst-cooldown strategy) is no longer always-on
+  in arena; `arena burst window` trigger + `arena burst sync` action hold
+  everyone's cooldowns until a teammate (bot **or human**) pops a burst aura
+  (Recklessness/Avenging Wrath/Icy Veins/... 18 iconic 3.3.5 auras) or the
+  kill target drops to execute range (≤50%), then the team unloads together
+- Rated arena participation itself is upstream machinery: enable via
+  `AiPlayerbot.RandomBotAutoJoinBGRatedArena{2v2,3v3}Count` (set in our live
+  conf); teams auto-create once level-70+ bot captains exist
+
+*Quest-help invites (2026-07-03):*
+- `QuestHelpOfferTrigger` + `OfferQuestHelpAction`: ungrouped bots in good
+  sentiment standing with a nearby real player (reads mod-ollama-chat's
+  sentiment table, cached) occasionally offer to group: ~2%/check when the bot
+  confirms a shared quest, 0.5% questing-nearby, 0.1% generic help offer —
+  say-line + real group invite. Conf: `AiPlayerbot.QuestHelp*`
+
+*Playstyles:*
 - Six RPG weight profiles (grinder/quester/socializer/explorer/pvper/idler) in
   `PlayerbotAIConfig`, tunable via `AiPlayerbot.RpgStatusProbWeight.<Profile>.<Status>`
 - `NewRpgBaseAction::RandomChangeStatus` resolves the bot's playstyle from its

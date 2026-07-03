@@ -1,3 +1,568 @@
+diff --git a/src/Ai/Base/ActionContext.h b/src/Ai/Base/ActionContext.h
+index 7b95e4b0..aa1abe79 100644
+--- a/src/Ai/Base/ActionContext.h
++++ b/src/Ai/Base/ActionContext.h
+@@ -123,6 +123,7 @@ public:
+         creators["dps assist"] = &ActionContext::dps_assist;
+         creators["dps aoe"] = &ActionContext::dps_aoe;
+         creators["attack rti target"] = &ActionContext::attack_rti_target;
++        creators["attack arena kill target"] = &ActionContext::attack_arena_kill_target;
+         creators["loot"] = &ActionContext::loot;
+         creators["add loot"] = &ActionContext::add_loot;
+         creators["add gathering loot"] = &ActionContext::add_gathering_loot;
+@@ -275,6 +276,7 @@ public:
+         creators["new rpg wander random"] = &ActionContext::new_rpg_wander_random;
+         creators["new rpg wander npc"] = &ActionContext::new_rpg_wander_npc;
+         creators["new rpg do quest"] = &ActionContext::new_rpg_do_quest;
++        creators["offer quest help"] = &ActionContext::offer_quest_help;
+         creators["new rpg travel flight"] = &ActionContext::new_rpg_travel_flight;
+         creators["new rpg outdoor pvp"] = &ActionContext::new_rpg_outdoor_pvp;
+         creators["wait for attack keep safe distance"] = &ActionContext::wait_for_attack_keep_safe_distance;
+@@ -357,6 +359,7 @@ private:
+     static Action* dps_assist(PlayerbotAI* botAI) { return new DpsAssistAction(botAI); }
+     static Action* dps_aoe(PlayerbotAI* botAI) { return new DpsAoeAction(botAI); }
+     static Action* attack_rti_target(PlayerbotAI* botAI) { return new AttackRtiTargetAction(botAI); }
++    static Action* attack_arena_kill_target(PlayerbotAI* botAI) { return new AttackArenaKillTargetAction(botAI); }
+     static Action* tank_assist(PlayerbotAI* botAI) { return new TankAssistAction(botAI); }
+     static Action* drink(PlayerbotAI* botAI) { return new DrinkAction(botAI); }
+     static Action* food(PlayerbotAI* botAI) { return new EatAction(botAI); }
+@@ -482,6 +485,7 @@ private:
+     static Action* new_rpg_wander_random(PlayerbotAI* ai) { return new NewRpgWanderRandomAction(ai); }
+     static Action* new_rpg_wander_npc(PlayerbotAI* ai) { return new NewRpgWanderNpcAction(ai); }
+     static Action* new_rpg_do_quest(PlayerbotAI* ai) { return new NewRpgDoQuestAction(ai); }
++    static Action* offer_quest_help(PlayerbotAI* ai) { return new OfferQuestHelpAction(ai); }
+     static Action* new_rpg_travel_flight(PlayerbotAI* ai) { return new NewRpgTravelFlightAction(ai); }
+     static Action* new_rpg_outdoor_pvp(PlayerbotAI* ai) { return new NewRpgOutdoorPvpAction(ai); }
+     static Action* wait_for_attack_keep_safe_distance(PlayerbotAI* ai) { return new WaitForAttackKeepSafeDistanceAction(ai); }
+diff --git a/src/Ai/Base/Actions/BattleGroundTactics.cpp b/src/Ai/Base/Actions/BattleGroundTactics.cpp
+index 238a2291..aa4f9fc7 100644
+--- a/src/Ai/Base/Actions/BattleGroundTactics.cpp
++++ b/src/Ai/Base/Actions/BattleGroundTactics.cpp
+@@ -4430,3 +4430,13 @@ bool ArenaTactics::moveToCenter(Battleground* bg)
+ 
+     return true;
+ }
++
++bool ArenaBurstSyncAction::Execute(Event /*event*/)
++{
++    // The trigger fires only when the boost strategy state disagrees with the
++    // team burst window, so flipping it reconciles the two.
++    bool bursting = botAI->HasStrategy("boost", BOT_STATE_COMBAT);
++    botAI->ChangeStrategy(bursting ? "-boost" : "+boost", BOT_STATE_COMBAT);
++    LOG_DEBUG("playerbots", "[Arena] Bot {} {} burst window", bot->GetName(), bursting ? "leaves" : "enters");
++    return true;
++}
+diff --git a/src/Ai/Base/Actions/BattleGroundTactics.h b/src/Ai/Base/Actions/BattleGroundTactics.h
+index 4c0072df..e3a1a596 100644
+--- a/src/Ai/Base/Actions/BattleGroundTactics.h
++++ b/src/Ai/Base/Actions/BattleGroundTactics.h
+@@ -144,4 +144,15 @@ private:
+     bool moveToCenter(Battleground* bg);
+ };
+ 
++// Toggles the boost (burst cooldown) strategy to match the team burst window
++// (see ArenaBurstWindowTrigger): cooldowns are held until a teammate bursts or
++// the kill target hits execute range, then the whole team unloads together.
++class ArenaBurstSyncAction : public Action
++{
++public:
++    ArenaBurstSyncAction(PlayerbotAI* botAI) : Action(botAI, "arena burst sync") {}
++
++    bool Execute(Event event) override;
++};
++
+ #endif
+diff --git a/src/Ai/Base/Actions/ChooseTargetActions.cpp b/src/Ai/Base/Actions/ChooseTargetActions.cpp
+index debcfac0..18d0386f 100644
+--- a/src/Ai/Base/Actions/ChooseTargetActions.cpp
++++ b/src/Ai/Base/Actions/ChooseTargetActions.cpp
+@@ -189,3 +189,15 @@ bool AttackRtiTargetAction::isUseful()
+ 
+     return true;
+ }
++
++bool AttackArenaKillTargetAction::isUseful()
++{
++    if (!bot->InArena())
++        return false;
++
++    if (botAI->ContainsStrategy(STRATEGY_TYPE_HEAL))
++        return false;
++
++    Unit* killTarget = AI_VALUE(Unit*, "arena kill target");
++    return killTarget && bot->GetVictim() != killTarget;
++}
+diff --git a/src/Ai/Base/Actions/ChooseTargetActions.h b/src/Ai/Base/Actions/ChooseTargetActions.h
+index 21a24aa3..385fb660 100644
+--- a/src/Ai/Base/Actions/ChooseTargetActions.h
++++ b/src/Ai/Base/Actions/ChooseTargetActions.h
+@@ -91,6 +91,15 @@ public:
+     bool isUseful() override;
+ };
+ 
++class AttackArenaKillTargetAction : public AttackAction
++{
++public:
++    AttackArenaKillTargetAction(PlayerbotAI* botAI) : AttackAction(botAI, "attack arena kill target") {}
++
++    std::string const GetTargetName() override { return "arena kill target"; }
++    bool isUseful() override;
++};
++
+ class DropTargetAction : public Action
+ {
+ public:
+diff --git a/src/Ai/Base/Actions/InviteToGroupAction.cpp b/src/Ai/Base/Actions/InviteToGroupAction.cpp
+index e7bcb4da..6cc8fe1e 100644
+--- a/src/Ai/Base/Actions/InviteToGroupAction.cpp
++++ b/src/Ai/Base/Actions/InviteToGroupAction.cpp
+@@ -6,12 +6,18 @@
+ #include "InviteToGroupAction.h"
+ 
+ #include "BroadcastHelper.h"
++#include "DatabaseEnv.h"
+ #include "Event.h"
+ #include "GuildMgr.h"
++#include "ObjectMgr.h"
+ #include "PlayerbotOperations.h"
+ #include "Playerbots.h"
+ #include "PlayerbotWorldThreadProcessor.h"
+ #include "ServerFacade.h"
++#include "StringFormat.h"
++#include "Timer.h"
++
++#include <mutex>
+ 
+ bool InviteToGroupAction::Invite(Player* inviter, Player* player)
+ {
+@@ -456,3 +462,105 @@ bool LfgAction::Execute(Event event)
+ 
+     return false;
+ }
++
++// Sentiment bridge to mod-ollama-chat (shared characters DB, guid counters):
++// cached per pair, neutral 0.5 when the chat module or the row is absent.
++static float GetBotPlayerSentiment(Player* bot, Player* player)
++{
++    static int hasTable = -1;
++    if (hasTable == -1)
++        hasTable = CharacterDatabase.Query(
++            "SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() "
++            "AND TABLE_NAME = 'mod_ollama_chat_bot_player_sentiments'") ? 1 : 0;
++    if (!hasTable)
++        return 0.5f;
++
++    static std::mutex sentimentCacheMutex;
++    static std::map<std::pair<ObjectGuid::LowType, ObjectGuid::LowType>, std::pair<float, uint32>> sentimentCache;
++    auto key = std::make_pair(bot->GetGUID().GetCounter(), player->GetGUID().GetCounter());
++    uint32 now = getMSTime();
++    {
++        std::lock_guard<std::mutex> lock(sentimentCacheMutex);
++        auto it = sentimentCache.find(key);
++        if (it != sentimentCache.end() && now - it->second.second < 5 * MINUTE * IN_MILLISECONDS)
++            return it->second.first;
++    }
++
++    float value = 0.5f;
++    QueryResult result = CharacterDatabase.Query(
++        "SELECT sentiment_value FROM mod_ollama_chat_bot_player_sentiments WHERE bot_guid = {} AND player_guid = {}",
++        key.first, key.second);
++    if (result)
++        value = (*result)[0].Get<float>();
++
++    std::lock_guard<std::mutex> lock(sentimentCacheMutex);
++    sentimentCache[key] = {value, now};
++    return value;
++}
++
++Player* OfferQuestHelpAction::FindQuestHelpTarget(Player* bot, PlayerbotAI* botAI, int& tier)
++{
++    if (!bot->IsAlive() || bot->GetGroup() || bot->InBattleground() || bot->IsInCombat())
++        return nullptr;
++
++    uint32 questId = 0;
++    if (botAI->rpgInfo.GetStatus() == RPG_DO_QUEST)
++        questId = std::get<NewRpgInfo::DoQuest>(botAI->rpgInfo.data).questId;
++
++    GuidVector nearGuids = botAI->GetAiObjectContext()->GetValue<GuidVector>("nearest friendly players")->Get();
++    for (ObjectGuid const& guid : nearGuids)
++    {
++        Player* player = ObjectAccessor::FindPlayer(guid);
++        if (!player || player == bot || !player->IsAlive() || player->GetGroup())
++            continue;
++        if (GET_PLAYERBOT_AI(player))
++            continue; // offer to real players; bots group up via other features
++        if (player->isDND() || player->IsBeingTeleported())
++            continue;
++        if (bot->GetDistance(player) > 30.0f)
++            continue;
++        if (GetBotPlayerSentiment(bot, player) < sPlayerbotAIConfig.questHelpSentimentThreshold)
++            continue;
++
++        if (questId && player->GetQuestStatus(questId) == QUEST_STATUS_INCOMPLETE)
++            tier = 2; // confirmed: same quest in both logs
++        else if (questId)
++            tier = 1; // bot is questing here, can't confirm the player is
++        else
++            tier = 0; // not questing - the rare generic help offer
++        return player;
++    }
++
++    return nullptr;
++}
++
++bool OfferQuestHelpAction::Execute(Event /*event*/)
++{
++    int tier = 0;
++    Player* target = FindQuestHelpTarget(bot, botAI, tier);
++    if (!target)
++        return false;
++
++    std::string line;
++    if (tier == 2)
++    {
++        uint32 questId = std::get<NewRpgInfo::DoQuest>(botAI->rpgInfo.data).questId;
++        Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
++        std::string title = quest ? quest->GetTitle() : "this quest";
++        line = urand(0, 1) ? Acore::StringFormat("hey you're on {} too right? group up, goes way faster", title)
++                           : Acore::StringFormat("doing {} as well - wanna knock it out together?", title);
++    }
++    else if (tier == 1)
++        line = urand(0, 1) ? "you questing around here too? wanna group up"
++                           : "grinding the same camp it looks like - group?";
++    else
++        line = urand(0, 1) ? "need a hand with anything? im around"
++                           : "if you need help with something just say";
++
++    bot->Say(line, LANG_UNIVERSAL);
++    bool invited = Invite(bot, target);
++    if (invited)
++        LOG_DEBUG("playerbots", "[QuestHelp] Bot {} offered quest help to {} (tier {})",
++                  bot->GetName(), target->GetName(), tier);
++    return invited;
++}
+diff --git a/src/Ai/Base/Actions/InviteToGroupAction.h b/src/Ai/Base/Actions/InviteToGroupAction.h
+index 02162ef3..a9998114 100644
+--- a/src/Ai/Base/Actions/InviteToGroupAction.h
++++ b/src/Ai/Base/Actions/InviteToGroupAction.h
+@@ -32,6 +32,20 @@ public:
+     bool Execute(Event event) override;
+ };
+ 
++// Bot-initiated quest help: invite a nearby real player the bot is in good
++// sentiment standing with (see QuestHelpOfferTrigger for the odds). Tier 2 =
++// bot confirmed the player shares its active quest, tier 1 = bot is questing
++// but can't confirm, tier 0 = generic rare help offer.
++class OfferQuestHelpAction : public InviteToGroupAction
++{
++public:
++    OfferQuestHelpAction(PlayerbotAI* botAI) : InviteToGroupAction(botAI, "offer quest help") {}
++
++    bool Execute(Event event) override;
++
++    static Player* FindQuestHelpTarget(Player* bot, PlayerbotAI* botAI, int& tier);
++};
++
+ class InviteNearbyToGroupAction : public InviteToGroupAction
+ {
+ public:
+diff --git a/src/Ai/Base/Strategy/BattlegroundStrategy.cpp b/src/Ai/Base/Strategy/BattlegroundStrategy.cpp
+index f414e752..80de4fec 100644
+--- a/src/Ai/Base/Strategy/BattlegroundStrategy.cpp
++++ b/src/Ai/Base/Strategy/BattlegroundStrategy.cpp
+@@ -84,4 +84,10 @@ void ArenaStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+ {
+     triggers.push_back(
+         new TriggerNode("no possible targets", { NextAction("arena tactics", ACTION_BG)}));
++    // team coordination: everyone on the called kill target, cooldowns
++    // held/released together with the team burst window
++    triggers.push_back(
++        new TriggerNode("arena focus", { NextAction("attack arena kill target", ACTION_HIGH + 5.0f)}));
++    triggers.push_back(
++        new TriggerNode("arena burst window", { NextAction("arena burst sync", ACTION_HIGH + 6.0f)}));
+ }
+diff --git a/src/Ai/Base/Trigger/PvpTriggers.cpp b/src/Ai/Base/Trigger/PvpTriggers.cpp
+index b20c5df9..8f8d074d 100644
+--- a/src/Ai/Base/Trigger/PvpTriggers.cpp
++++ b/src/Ai/Base/Trigger/PvpTriggers.cpp
+@@ -9,6 +9,7 @@
+ #include "BattlegroundEY.h"
+ #include "BattlegroundMgr.h"
+ #include "BattlegroundWS.h"
++#include "ObjectAccessor.h"
+ #include "Playerbots.h"
+ #include "ServerFacade.h"
+ #include "BattlegroundAV.h"
+@@ -335,3 +336,75 @@ bool AllianceNoSnowfallGY::IsActive()
+ 
+     return false;
+ }
++
++bool ArenaFocusTrigger::IsActive()
++{
++    if (!bot->InArena())
++        return false;
++
++    Unit* killTarget = AI_VALUE(Unit*, "arena kill target");
++    return killTarget && bot->GetVictim() != killTarget;
++}
++
++// Iconic offensive burst cooldowns per class (3.3.5a). Used to detect that a
++// teammate - bot or real player - just opened a burst window.
++static bool HasBurstAura(Player* player)
++{
++    static uint32 const burstAuras[] = {
++        1719,   // Recklessness
++        12292,  // Death Wish
++        31884,  // Avenging Wrath
++        12472,  // Icy Veins
++        12042,  // Arcane Power
++        11129,  // Combustion
++        13750,  // Adrenaline Rush
++        51690,  // Killing Spree
++        51713,  // Shadow Dance
++        19574,  // Bestial Wrath
++        3045,   // Rapid Fire
++        2825,   // Bloodlust
++        32182,  // Heroism
++        16166,  // Elemental Mastery
++        47241,  // Metamorphosis
++        49016,  // Hysteria
++        50334,  // Berserk (feral)
++        49206   // Summon Gargoyle
++    };
++    for (uint32 spellId : burstAuras)
++        if (player->HasAura(spellId))
++            return true;
++
++    return false;
++}
++
++bool ArenaBurstWindowTrigger::IsActive()
++{
++    if (!bot->InArena() || !bot->IsAlive())
++        return false;
++
++    Battleground* bg = bot->GetBattleground();
++    if (!bg || bg->GetStatus() != STATUS_IN_PROGRESS)
++        return false;
++
++    bool window = false;
++    for (auto const& itr : bg->GetPlayers())
++    {
++        Player* member = ObjectAccessor::FindPlayer(itr.first);
++        if (!member || !member->IsAlive() || member->GetBgTeamId() != bot->GetBgTeamId())
++            continue;
++
++        if (HasBurstAura(member))
++        {
++            window = true;
++            break;
++        }
++    }
++
++    if (!window)
++    {
++        Unit* killTarget = AI_VALUE(Unit*, "arena kill target");
++        window = killTarget && killTarget->GetHealthPct() <= 50.0f;
++    }
++
++    return window != botAI->HasStrategy("boost", BOT_STATE_COMBAT);
++}
+diff --git a/src/Ai/Base/Trigger/PvpTriggers.h b/src/Ai/Base/Trigger/PvpTriggers.h
+index 5077dda7..c1cb77f7 100644
+--- a/src/Ai/Base/Trigger/PvpTriggers.h
++++ b/src/Ai/Base/Trigger/PvpTriggers.h
+@@ -26,6 +26,25 @@ public:
+     bool IsActive() override;
+ };
+ 
++class ArenaFocusTrigger : public Trigger
++{
++public:
++    ArenaFocusTrigger(PlayerbotAI* botAI) : Trigger(botAI, "arena focus", 2) {}
++
++    bool IsActive() override;
++};
++
++// Active when the bot's boost (burst cooldown) strategy state disagrees with
++// the team burst window: a teammate - bot or human - has a burst cooldown
++// running, or the kill target is in execute range.
++class ArenaBurstWindowTrigger : public Trigger
++{
++public:
++    ArenaBurstWindowTrigger(PlayerbotAI* botAI) : Trigger(botAI, "arena burst window", 2) {}
++
++    bool IsActive() override;
++};
++
+ // NOTE this trigger is only active when bot is actively returning flag
+ // (not when hiding in base because enemy has flag too)
+ class PlayerHasFlag : public Trigger
+diff --git a/src/Ai/Base/TriggerContext.h b/src/Ai/Base/TriggerContext.h
+index 3b30691d..1e9983a8 100644
+--- a/src/Ai/Base/TriggerContext.h
++++ b/src/Ai/Base/TriggerContext.h
+@@ -88,6 +88,8 @@ public:
+         creators["not dps aoe target active"] = &TriggerContext::not_dps_aoe_target_active;
+         creators["has nearest adds"] = &TriggerContext::has_nearest_adds;
+         creators["enemy player near"] = &TriggerContext::enemy_player_near;
++        creators["arena focus"] = &TriggerContext::arena_focus;
++        creators["arena burst window"] = &TriggerContext::arena_burst_window;
+ 
+         creators["tank assist"] = &TriggerContext::TankAssist;
+         creators["lose aggro"] = &TriggerContext::LoseAggro;
+@@ -237,6 +239,7 @@ public:
+         creators["wander random status"] = &TriggerContext::wander_random_status;
+         creators["wander npc status"] = &TriggerContext::wander_npc_status;
+         creators["do quest status"] = &TriggerContext::do_quest_status;
++        creators["quest help offer"] = &TriggerContext::quest_help_offer;
+         creators["travel flight status"] = &TriggerContext::travel_flight_status;
+         creators["outdoor pvp status"] = &TriggerContext::outdoor_pvp_status;
+         creators["can self resurrect"] = &TriggerContext::can_self_resurrect;
+@@ -338,6 +341,8 @@ private:
+     static Trigger* not_dps_aoe_target_active(PlayerbotAI* botAI) { return new NotDpsAoeTargetActiveTrigger(botAI); }
+     static Trigger* has_nearest_adds(PlayerbotAI* botAI) { return new HasNearestAddsTrigger(botAI); }
+     static Trigger* enemy_player_near(PlayerbotAI* botAI) { return new EnemyPlayerNear(botAI); }
++    static Trigger* arena_focus(PlayerbotAI* botAI) { return new ArenaFocusTrigger(botAI); }
++    static Trigger* arena_burst_window(PlayerbotAI* botAI) { return new ArenaBurstWindowTrigger(botAI); }
+     static Trigger* Random(PlayerbotAI* botAI) { return new RandomTrigger(botAI, "random", 20); }
+     static Trigger* seldom(PlayerbotAI* botAI) { return new RandomTrigger(botAI, "seldom", 300); }
+     static Trigger* often(PlayerbotAI* botAI) { return new RandomTrigger(botAI, "often", 5); }
+@@ -451,6 +456,7 @@ private:
+     static Trigger* wander_random_status(PlayerbotAI* botAI) { return new NewRpgStatusTrigger(botAI, RPG_WANDER_RANDOM); }
+     static Trigger* wander_npc_status(PlayerbotAI* botAI) { return new NewRpgStatusTrigger(botAI, RPG_WANDER_NPC); }
+     static Trigger* do_quest_status(PlayerbotAI* botAI) { return new NewRpgStatusTrigger(botAI, RPG_DO_QUEST); }
++    static Trigger* quest_help_offer(PlayerbotAI* botAI) { return new QuestHelpOfferTrigger(botAI); }
+     static Trigger* travel_flight_status(PlayerbotAI* botAI) { return new NewRpgStatusTrigger(botAI, RPG_TRAVEL_FLIGHT); }
+     static Trigger* outdoor_pvp_status(PlayerbotAI* botAI) { return new NewRpgStatusTrigger(botAI, RPG_OUTDOOR_PVP); }
+     static Trigger* can_self_resurrect(PlayerbotAI* ai) { return new SelfResurrectTrigger(ai); }
+diff --git a/src/Ai/Base/Value/LeastHpTargetValue.cpp b/src/Ai/Base/Value/LeastHpTargetValue.cpp
+index d8579f0d..dd21bbc9 100644
+--- a/src/Ai/Base/Value/LeastHpTargetValue.cpp
++++ b/src/Ai/Base/Value/LeastHpTargetValue.cpp
+@@ -6,6 +6,8 @@
+ #include "LeastHpTargetValue.h"
+ 
+ #include "AttackersValue.h"
++#include "Battleground.h"
++#include "ObjectAccessor.h"
+ #include "Playerbots.h"
+ 
+ class FindLeastHpTargetStrategy : public FindNonCcTargetStrategy
+@@ -32,3 +34,52 @@ Unit* LeastHpTargetValue::Calculate()
+ 
+     return FindTarget(&strategy);
+ }
++
++Unit* ArenaKillTargetValue::Calculate()
++{
++    if (!bot->InArena())
++        return nullptr;
++
++    Battleground* bg = bot->GetBattleground();
++    if (!bg || bg->GetStatus() != STATUS_IN_PROGRESS)
++        return nullptr;
++
++    // A real player on the team calls the kill target just by attacking:
++    // whatever the human is hitting, the bots assist.
++    for (auto const& itr : bg->GetPlayers())
++    {
++        Player* member = ObjectAccessor::FindPlayer(itr.first);
++        if (!member || member->GetBgTeamId() != bot->GetBgTeamId())
++            continue;
++
++        PlayerbotAI* memberAI = GET_PLAYERBOT_AI(member);
++        if (memberAI && !memberAI->IsRealPlayer())
++            continue;
++
++        Unit* victim = member->GetVictim();
++        if (victim && victim->IsAlive() && victim->IsPlayer() &&
++            victim->ToPlayer()->GetBgTeamId() != bot->GetBgTeamId())
++            return victim;
++    }
++
++    // The players map is guid-ordered and health is bucketed, so every member
++    // of the team picks the same enemy and the pick doesn't flap between
++    // similar-health targets mid-fight.
++    Unit* best = nullptr;
++    uint32 bestScore = 0xFFFFFFFF;
++    for (auto const& itr : bg->GetPlayers())
++    {
++        Player* enemy = ObjectAccessor::FindPlayer(itr.first);
++        if (!enemy || !enemy->IsAlive() || enemy->GetBgTeamId() == bot->GetBgTeamId())
++            continue;
++
++        uint32 score = (PlayerbotAI::IsHeal(enemy, true) ? 0 : 1000) + uint32(enemy->GetHealthPct()) / 15;
++        if (score < bestScore)
++        {
++            best = enemy;
++            bestScore = score;
++        }
++    }
++
++    return best;
++}
+diff --git a/src/Ai/Base/Value/LeastHpTargetValue.h b/src/Ai/Base/Value/LeastHpTargetValue.h
+index 5f7b2c74..fe441514 100644
+--- a/src/Ai/Base/Value/LeastHpTargetValue.h
++++ b/src/Ai/Base/Value/LeastHpTargetValue.h
+@@ -19,4 +19,15 @@ public:
+     Unit* Calculate() override;
+ };
+ 
++// Team-wide arena kill target: healers first, then lowest health. Computed
++// deterministically from shared world state so every team member independently
++// agrees on the same victim (no messaging needed).
++class ArenaKillTargetValue : public TargetValue
++{
++public:
++    ArenaKillTargetValue(PlayerbotAI* botAI, std::string const name = "arena kill target") : TargetValue(botAI, name) {}
++
++    Unit* Calculate() override;
++};
++
+ #endif
+diff --git a/src/Ai/Base/ValueContext.h b/src/Ai/Base/ValueContext.h
+index 39262102..0f9983cb 100644
+--- a/src/Ai/Base/ValueContext.h
++++ b/src/Ai/Base/ValueContext.h
+@@ -259,6 +259,7 @@ public:
+         creators["bg master"] = &ValueContext::bg_master;
+         creators["enemy flag carrier"] = &ValueContext::enemy_fc;
+         creators["team flag carrier"] = &ValueContext::team_fc;
++        creators["arena kill target"] = &ValueContext::arena_kill_target;
+ 
+         creators["home bind"] = &ValueContext::home_bind;
+         creators["last long move"] = &ValueContext::last_long_move;
+@@ -511,6 +512,7 @@ private:
+     static UntypedValue* rpg_bg_type(PlayerbotAI* botAI) { return new RpgBgTypeValue(botAI); }
+     static UntypedValue* team_fc(PlayerbotAI* botAI) { return new FlagCarrierValue(botAI, true, true); }
+     static UntypedValue* enemy_fc(PlayerbotAI* botAI) { return new FlagCarrierValue(botAI, false, true); }
++    static UntypedValue* arena_kill_target(PlayerbotAI* botAI) { return new ArenaKillTargetValue(botAI); }
+ 
+     static UntypedValue* last_long_move(PlayerbotAI* botAI) { return new LastLongMoveValue(botAI); }
+     static UntypedValue* home_bind(PlayerbotAI* botAI) { return new HomeBindValue(botAI); }
+diff --git a/src/Ai/Base/WorldPacketActionContext.h b/src/Ai/Base/WorldPacketActionContext.h
+index 9aa7eeaf..b4f2b4b2 100644
+--- a/src/Ai/Base/WorldPacketActionContext.h
++++ b/src/Ai/Base/WorldPacketActionContext.h
+@@ -103,6 +103,7 @@ public:
+         creators["bg join"] = &WorldPacketActionContext::bg_join;
+         creators["bg leave"] = &WorldPacketActionContext::bg_leave;
+         creators["arena tactics"] = &WorldPacketActionContext::arena_tactics;
++        creators["arena burst sync"] = &WorldPacketActionContext::arena_burst_sync;
+         creators["petition sign"] = &WorldPacketActionContext::petition_sign;
+         creators["lfg join"] = &WorldPacketActionContext::lfg_join;
+         creators["lfg accept"] = &WorldPacketActionContext::lfg_accept;
+@@ -169,6 +170,7 @@ private:
+     static Action* bg_status_check(PlayerbotAI* botAI) { return new BGStatusCheckAction(botAI); }
+     static Action* bg_strategy_check(PlayerbotAI* botAI) { return new BGStrategyCheckAction(botAI); }
+     static Action* arena_tactics(PlayerbotAI* botAI) { return new ArenaTactics(botAI); }
++    static Action* arena_burst_sync(PlayerbotAI* botAI) { return new ArenaBurstSyncAction(botAI); }
+     static Action* petition_sign(PlayerbotAI* botAI) { return new PetitionSignAction(botAI); }
+     static Action* lfg_teleport(PlayerbotAI* botAI) { return new LfgTeleportAction(botAI); }
+     static Action* lfg_leave(PlayerbotAI* botAI) { return new LfgLeaveAction(botAI); }
 diff --git a/src/Ai/World/Rpg/Action/NewRpgBaseAction.cpp b/src/Ai/World/Rpg/Action/NewRpgBaseAction.cpp
 index e67a1c7c..8c8720f0 100644
 --- a/src/Ai/World/Rpg/Action/NewRpgBaseAction.cpp
@@ -124,11 +689,90 @@ index e67a1c7c..8c8720f0 100644
      switch (chosenStatus)
      {
          case RPG_WANDER_RANDOM:
+diff --git a/src/Ai/World/Rpg/Strategy/NewRpgStrategy.cpp b/src/Ai/World/Rpg/Strategy/NewRpgStrategy.cpp
+index 521b15c3..c3ab4849 100644
+--- a/src/Ai/World/Rpg/Strategy/NewRpgStrategy.cpp
++++ b/src/Ai/World/Rpg/Strategy/NewRpgStrategy.cpp
+@@ -73,6 +73,15 @@ void NewRpgStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+             }
+         )
+     );
++    // sentiment-gated proactive quest-help invites toward nearby real players
++    triggers.push_back(
++        new TriggerNode(
++            "quest help offer",
++            {
++                NextAction("offer quest help", 12.0f)
++            }
++        )
++    );
+ }
+ 
+ void NewRpgStrategy::InitMultipliers(std::vector<Multiplier*>&)
+diff --git a/src/Ai/World/Rpg/Trigger/NewRpgTrigger.cpp b/src/Ai/World/Rpg/Trigger/NewRpgTrigger.cpp
+index 65e78eb4..a271e20b 100644
+--- a/src/Ai/World/Rpg/Trigger/NewRpgTrigger.cpp
++++ b/src/Ai/World/Rpg/Trigger/NewRpgTrigger.cpp
+@@ -1,4 +1,19 @@
+ #include "NewRpgTriggers.h"
++#include "InviteToGroupAction.h"
+ #include "PlayerbotAI.h"
++#include "PlayerbotAIConfig.h"
++#include "Random.h"
+ 
+ bool NewRpgStatusTrigger::IsActive() { return status == botAI->rpgInfo.GetStatus(); }
++
++bool QuestHelpOfferTrigger::IsActive()
++{
++    int tier = 0;
++    if (!OfferQuestHelpAction::FindQuestHelpTarget(bot, botAI, tier))
++        return false;
++
++    float chance = tier == 2 ? sPlayerbotAIConfig.questHelpConfirmedChance
++                 : tier == 1 ? sPlayerbotAIConfig.questHelpNearbyChance
++                             : sPlayerbotAIConfig.questHelpRandomChance;
++    return roll_chance_f(chance);
++}
+diff --git a/src/Ai/World/Rpg/Trigger/NewRpgTriggers.h b/src/Ai/World/Rpg/Trigger/NewRpgTriggers.h
+index 15b2243d..40b2c396 100644
+--- a/src/Ai/World/Rpg/Trigger/NewRpgTriggers.h
++++ b/src/Ai/World/Rpg/Trigger/NewRpgTriggers.h
+@@ -17,4 +17,15 @@ protected:
+     NewRpgStatus status;
+ };
+ 
++// Fires (rarely) when an ungrouped bot in good sentiment standing with a
++// nearby real player decides to offer quest help - most likely when it can
++// confirm the player shares its active quest.
++class QuestHelpOfferTrigger : public Trigger
++{
++public:
++    QuestHelpOfferTrigger(PlayerbotAI* botAI) : Trigger(botAI, "quest help offer", 30) {}
++
++    bool IsActive() override;
++};
++
+ #endif
+diff --git a/src/Bot/Factory/AiFactory.cpp b/src/Bot/Factory/AiFactory.cpp
+index dfbe1f96..0750915c 100644
+--- a/src/Bot/Factory/AiFactory.cpp
++++ b/src/Bot/Factory/AiFactory.cpp
+@@ -482,7 +482,9 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
+         if (player->InArena())
+         {
+             engine->addStrategy("arena", false);
+-            engine->addStrategiesNoInit("boost", "racials", "chat", "default", "aoe", "cast time", "dps assist", nullptr);
++            // no "boost" here: burst cooldowns are held until the team burst
++            // window opens (see ArenaBurstWindowTrigger / arena burst sync)
++            engine->addStrategiesNoInit("racials", "chat", "default", "aoe", "cast time", "dps assist", nullptr);
+         }
+         else
+             engine->addStrategiesNoInit("boost", "racials", "chat", "default", "aoe", "potions", "cast time", "dps assist", nullptr);
 diff --git a/src/PlayerbotAIConfig.cpp b/src/PlayerbotAIConfig.cpp
-index 37c74ac2..44932d3b 100644
+index 37c74ac2..aab6bd95 100644
 --- a/src/PlayerbotAIConfig.cpp
 +++ b/src/PlayerbotAIConfig.cpp
-@@ -684,6 +684,31 @@ bool PlayerbotAIConfig::Initialize()
+@@ -684,9 +684,42 @@ bool PlayerbotAIConfig::Initialize()
      RpgStatusProbWeight[RPG_REST] = sConfigMgr->GetOption<int32>("AiPlayerbot.RpgStatusProbWeight.Rest", 5);
      RpgStatusProbWeight[RPG_OUTDOOR_PVP] = sConfigMgr->GetOption<int32>("AiPlayerbot.RpgStatusProbWeight.OutdoorPvp", 10);
  
@@ -160,11 +804,22 @@ index 37c74ac2..44932d3b 100644
      syncLevelWithPlayers = sConfigMgr->GetOption<bool>("AiPlayerbot.SyncLevelWithPlayers", false);
      randomBotGroupNearby = sConfigMgr->GetOption<bool>("AiPlayerbot.RandomBotGroupNearby", false);
  
++    // Bot-initiated quest-help invites toward real players in good sentiment
++    // standing (mod-ollama-chat sentiment >= threshold). Chances are percent
++    // per 30-second eligibility check.
++    questHelpSentimentThreshold = sConfigMgr->GetOption<float>("AiPlayerbot.QuestHelpSentimentThreshold", 0.6f);
++    questHelpConfirmedChance = sConfigMgr->GetOption<float>("AiPlayerbot.QuestHelpConfirmedChance", 2.0f);
++    questHelpNearbyChance = sConfigMgr->GetOption<float>("AiPlayerbot.QuestHelpNearbyChance", 0.5f);
++    questHelpRandomChance = sConfigMgr->GetOption<float>("AiPlayerbot.QuestHelpRandomChance", 0.1f);
++
+     // arena
+     randomBotArenaTeam2v2Count = sConfigMgr->GetOption<int32>("AiPlayerbot.RandomBotArenaTeam2v2Count", 10);
+     randomBotArenaTeam3v3Count = sConfigMgr->GetOption<int32>("AiPlayerbot.RandomBotArenaTeam3v3Count", 10);
 diff --git a/src/PlayerbotAIConfig.h b/src/PlayerbotAIConfig.h
-index fa8a10de..5fa31ebf 100644
+index fa8a10de..d351f245 100644
 --- a/src/PlayerbotAIConfig.h
 +++ b/src/PlayerbotAIConfig.h
-@@ -371,6 +371,10 @@ public:
+@@ -371,10 +371,19 @@ public:
      bool autoDoQuests;
      bool enableNewRpgStrategy;
      std::unordered_map<NewRpgStatus, uint32> RpgStatusProbWeight;
@@ -175,3 +830,12 @@ index fa8a10de..5fa31ebf 100644
      bool syncLevelWithPlayers;
      bool autoLearnQuestSpells;
      bool autoTeleportForLevel;
+     bool randomBotGroupNearby;
++    // Bot-initiated quest-help invites (sentiment-gated, % per 30s check)
++    float questHelpSentimentThreshold;
++    float questHelpConfirmedChance;
++    float questHelpNearbyChance;
++    float questHelpRandomChance;
+     int32 enableRandomBotTrading;
+     uint32 tweakValue;  // Debugging config
+ 

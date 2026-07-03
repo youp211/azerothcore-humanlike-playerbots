@@ -85,6 +85,15 @@ until sudo mariadb -N -e "SELECT 1 FROM acore_auth.account LIMIT 1;" > /dev/null
     sleep 15
 done
 
+# On the first boot after a wipe, authserver can lose the race to populate the
+# empty auth DB against worldserver's importer and exit ("Could not populate
+# the Login database"). Now that the schema exists, bring it back if it died.
+if ! pgrep -x authserver > /dev/null; then
+    tmux kill-session -t auth 2>/dev/null || true
+    tmux new-session -d -s auth -c "$ROOT/server/bin" ./authserver
+    echo "authserver relaunched (lost the first-boot DB race)"
+fi
+
 python3 - <<'EOF'
 import hashlib, os, subprocess
 # AzerothCore SRP6: v = g^SHA1(salt || SHA1(USER:PASS)) mod N, little-endian
