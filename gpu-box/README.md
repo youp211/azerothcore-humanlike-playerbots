@@ -1,8 +1,17 @@
 # GPU Box (RX 7900 XT) — Chat Inference + Fine-Tuning
 
-Scripts for the second machine (7900XT / 14th-gen i7 / 32 GB, Linux). The wow
-server offloads all bot-chat LLM inference here, and the same card fine-tunes
-the chat model.
+> **2026-07-02 update: the realm was migrated ONTO this machine** — realm and
+> GPU inference are now the same box, so the "two machines" framing below is
+> historical. In the consolidated setup: Ollama binds localhost (not LAN),
+> `02-verify-lan.sh` is unnecessary, and `apply-gpu-config.sh 127.0.0.1
+> <model>` is how model switches are applied. Training was run for real on
+> this box — the training/export workflow with its safety gates now lives in
+> **`finetune/README.md`**; scripts here were fixed after their first real run
+> (rocminfo SIGPIPE false-fail, llama.cpp requirements clobbering ROCm torch,
+> dotless console commands — details in `docs/BUILD-NOTES.md` Section 16).
+
+Scripts originally written for a second machine (7900XT / 14th-gen i7 / 32 GB,
+Linux) serving a separate wow server over the LAN.
 
 ## Order of operations
 

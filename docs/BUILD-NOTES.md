@@ -302,3 +302,122 @@ Every incident hit so far and its resolution — check here first:
 | Worldserver running but no `AC>` console | process orphaned from dead tmux | works fine; restart via start.sh when convenient |
 | `.ollama reload` didn't change bot personalities | assignments load at startup only | restart worldserver (templates *do* hot-reload) |
 | Bot chat slow/laggy | GPU offload not active, MaxConcurrentQueries=2 | run gpu-box/01 + apply-gpu-config.sh (Section 6) |
+
+---
+
+# Part 2 — The behavior suite
+
+Everything after the original build, in order (2026-07-02 evening → 2026-07-03).
+
+## 14. First boot quirks (2026-07-02)
+
+First boot quirks fixed permanently in `reset-world.sh`:
+
+- **authserver loses the first-boot race**: on an empty auth DB, authserver
+  and worldserver both try to populate it; authserver dies ("Could not
+  populate the Login database"). The script now relaunches it once the schema
+  exists.
+- **Personalities before first roll**: the wipe drops the personality
+  templates; the script now applies `personalities.sql` the moment the
+  module's SQL updater recreates the table — all 75 types appear from the
+  first assignment wave (verified: 73→75 distinct within minutes; previously
+  bots rolled from the upstream 33 and needed a clear+restart dance).
+- `--no-start` flag for staged resets.
+
+## 15. Fine-tune pipeline, actually run (v1)
+
+The `gpu-box/` scripts had never been fully executed.
+First real run found three latent bugs (all fixed in the scripts):
+
+1. `rocminfo | grep -m1 gfx` under `set -o pipefail` **false-fails**: grep's
+   early exit SIGPIPEs rocminfo. Capture to a file, then grep.
+2. llama.cpp's `requirements-convert_hf_to_gguf.txt` **replaces ROCm torch
+   with a CPU build** from PyPI. Re-pin the ROCm wheels after that step.
+3. `apply-gpu-config.sh` sent `.ollama reload` to the worldserver console —
+   console commands are dotless.
+
+v1 results: QLoRA of Qwen3-4B-Instruct, 4,900 examples, 2 epochs ≈ 50 min,
+loss 3.26 → 0.21. Q8_0 chosen over Q4_K_M for best output (114 vs 152 tok/s —
+both ~0.2 s per reply, quality wins). Eval harness added at
+`finetune/eval_models.py`. Voice transformation: 4-word avg replies, 92%
+lazy-caps, zero assistant-isms (base model: 13-word proper-case ramble).
+
+## 16. Playstyles (personality-driven gameplay)
+
+Design and verification in [BOT-BEHAVIOR.md Section 3](BOT-BEHAVIOR.md). Journal
+lessons:
+
+- The engine's `RpgStatusProbWeight` is global; the patch resolves a per-bot
+  profile from the chat personality's new `playstyle` column (cross-module DB
+  read, cached, `information_schema`-probed).
+- **Measurement trap #1**: "[New RPG] select random grind pos" log lines fire
+  in `CheckRpgStatusAvailable` — once per roll *per candidate*, chosen or not.
+  They count rolls, not choices.
+- **Measurement trap #2**: status durations differ wildly (Rest is short,
+  GoGrind is long), so per-bot event counts are duration-confounded — idlers
+  "led grinding" in the naive count purely by rolling more often.
+- Resolution: log the roll outcome itself (`rolled status N` debug line),
+  1,142 samples → every profile's signature status dominates as designed
+  (grinder 59% grind, quester 72% quest, idler 40% rest).
+
+## 17. Behavior suite day (2026-07-03)
+
+**Arena coordination** — deterministic kill-target calling (healer-first,
+lowest-HP, guid-ordered ties; a real player's victim overrides), plus
+synchronized burst: `boost` removed from the arena default strategy set,
+toggled team-wide by a burst-window trigger (teammate burst aura — 18 iconic
+3.3.5 spells, human's count too — or kill target ≤50%). Rated arena auto-join
+enabled (2v2×2, 3v3×1); dormant until level-70+ captains exist, then teams
+auto-create. mod-playerbots does all of this; no LLM in the loop.
+
+**Gear-inspect chat** — `{gear_context}` placeholder: weakest armor slot,
+class stat priority, and a real tradeable upgrade from the bot's own bags if
+one exists; recognition tiers (solid / epic raid set / PvP resilience) so
+well-geared players get respect instead of nagging. Reactions are
+personality-trained, not templated.
+
+**Quest-help invites** — sentiment-gated (≥0.6), tiered odds (confirmed shared
+quest 2%/check > questing nearby 0.5% > random 0.1%), say-line + real group
+invite. Sentiment read crosses modules the same way playstyles do.
+
+**Personalities** — EGIRL (socializer, ×1.6 reply chance) and
+ELITE_ARENA_PVPER (pvper, temp 0.9) → 75 total.
+
+**wow-chat v2 and the corruption incident** — dataset v2 (42 personalities,
+~35% gear contexts with per-personality reaction banks). Round-2 training
+produced a model emitting garbled subwords ("Billgtnrd") **with a clean,
+bit-identical-to-round-3 loss curve** — and it briefly reached the realm alias
+before sample reading caught it. Both quants were garbled → corruption
+upstream of quantization, in the merge/export (which had run while a parallel
+`make -j8` + worldserver restarts hammered the system); round 3 on identical
+data/seed, exported quietly, came out clean and passed all
+personality-gated gear probes (WOW_MOM gifts the actual bag item by name,
+ELITE_ARENA_PVPER lectures, EGIRL compliments raid gear, GOLD_FARMER sells).
+Procedure change: **stage as `wow-chat:q8-test`, eval coherence with samples,
+keep `wow-chat:v1` as rollback, only then re-alias**. Loss curves do not
+validate exports.
+
+## 18. Client setup
+
+Fresh prefix `~/.wine-wow` (wine + i386 already present), client run in place
+from `wotlk/wotlk/` (no 17 GB copy into the prefix this time). `Config.wtf`
+carried the anti-freeze fixes (gxApi opengl, gxWindow 1, ToS flags);
+added `gxResolution 3840x2160`, `gxMaximize 1`, `useUiScale 1` for the 4K
+monitor. Stale `Cache/WDB` deleted after each world wipe. Desktop launcher
+`wow-gigi.desktop` (app menu + Desktop) with the icon extracted from Wow.exe
+via icoutils; launch env `XMODIFIERS=@im=none` remains mandatory (ibus/XIM
+freeze).
+
+## 19. Troubleshooting log, part 2
+
+| Symptom | Root cause | Fix |
+|---|---|---|
+| authserver dead after fresh-world first boot | lost the auth-DB populate race to worldserver | reset-world.sh relaunches it (Section 15) |
+| Only 33 personality types in play on fresh world | assignments rolled before personalities.sql applied | reset-world.sh loads templates before first login (Section 15) |
+| `03-setup-training.sh`: "ROCm not working" but rocminfo fine | grep -m1 SIGPIPE under pipefail | capture-then-grep (Section 16) |
+| torch suddenly CPU-only in training venv | llama.cpp requirements pulled PyPI torch | re-pin ROCm wheels (Section 16) |
+| Idlers top the "grinding" stats | counting availability-check log lines, not roll outcomes | count `rolled status` lines (Section 17) |
+| Fine-tuned model emits garbled subwords, loss curve clean | corrupted merge/export (ran under heavy load) | retrain/re-export quiet; coherence-gate deploys (Section 18) |
+| Realm chat suddenly incoherent after model deploy | bad model reached the `wow-chat` alias | `ollama cp wow-chat:v1 wow-chat` (instant rollback) |
+| Client window cropped / UI microscopic at 4K | native-res window without maximize/uiScale | gxMaximize 1 + useUiScale 1 (Section 19) |
+| Old model still resident in VRAM after re-alias | keep_alive=-1 runners keyed by digest | `sudo systemctl restart ollama`, warm once |

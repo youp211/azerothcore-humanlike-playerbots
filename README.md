@@ -1,199 +1,207 @@
 # WoW 3.3.5a Server — AzerothCore + Humanlike Playerbots
 
 A private WotLK (3.3.5a, build 12340) server whose world is populated by 500
-autonomous player bots: they quest, grind, travel between zones, rest at inns,
-queue for battlegrounds and dungeons, upgrade their gear, and chat in-character
-via an LLM — with 73 distinct personalities, per-personality talkativeness/voice,
-and relationships that evolve through duels, grouping, and guild life.
+autonomous player bots: they quest, grind, travel, rest at inns, queue for
+battlegrounds and dungeons, upgrade their gear — and behave like *people*:
 
-Built 2026-07-02 on LMDE 7 (Debian 13 "trixie"), i7-1185G7, 32 GB RAM.
-LLM inference offloads to a second machine (RX 7900 XT) — see `gpu-box/README.md`.
+- **75 chat personalities** with per-personality talkativeness, verbosity, and
+  chaos, speaking through a locally fine-tuned LLM (`wow-chat`) in an
+  authentic 2008 voice.
+- **Playstyles**: a bot's personality drives its *gameplay* — grinders farm
+  mobs, socializers loiter in town, idlers nap at inns, pvpers hunt world PvP.
+- **Gear awareness**: bots inspect players they talk to and react in-voice —
+  helpful types offer real spare items from their bags, merchants try to sell,
+  elitists mock, and everyone recognizes raid sets and PvP resilience gear.
+- **Relationships**: per-pair sentiment evolves through chat tone, duels,
+  grouping, and guild life. Bots in good standing occasionally *offer to
+  group* with you — most likely when they can confirm you share their quest.
+- **Arena coordination**: bot arena teams focus one kill target (yours, if you
+  attack first) and hold burst cooldowns until a teammate — including you —
+  pops theirs. (Activates once bots level to 70+.)
 
-Repo layout: work was developed on branches (`gpu-box`, `ollama-chat-mods`,
-`personalities`, `finetune`) merged into `main`.
+**Deep dive on every behavior system: [docs/BOT-BEHAVIOR.md](docs/BOT-BEHAVIOR.md).**
+**Full build/migration history with every problem and fix: [docs/BUILD-NOTES.md](docs/BUILD-NOTES.md).**
 
-**Full build history, every problem hit and its fix: [docs/BUILD-NOTES.md](docs/BUILD-NOTES.md).**
+Current host (since 2026-07-02): i7-14700K, 32 GB RAM, **RX 7900 XT** — the
+realm and its LLM inference run on the same box (Ollama/ROCm, ~114 tok/s,
+~0.2 s per chat reply). Originally built on an i7-1185G7 box and migrated;
+the realm address is **127.0.0.1**.
 
 ## Stack
 
 | Component | What / where |
 |---|---|
 | Core | [liyunfan1223/azerothcore-wotlk](https://github.com/liyunfan1223/azerothcore-wotlk), branch `Playerbot` (custom fork — **required**, stock AzerothCore will not compile the bot module) |
-| Bots | [liyunfan1223/mod-playerbots](https://github.com/liyunfan1223/mod-playerbots), branch `master` |
-| LLM chat | [DustinHendrickson/mod-ollama-chat](https://github.com/DustinHendrickson/mod-ollama-chat) + local [Ollama](https://ollama.com) running `llama3.2:3b` |
-| Database | MariaDB 11.8 (Debian packages) — **needs the local patches below** |
+| Bots | [liyunfan1223/mod-playerbots](https://github.com/liyunfan1223/mod-playerbots), branch `master` + our patches |
+| LLM chat | [DustinHendrickson/mod-ollama-chat](https://github.com/DustinHendrickson/mod-ollama-chat) + our patches + local [Ollama](https://ollama.com) (ROCm) serving **`wow-chat`** (fine-tuned Qwen3-4B, Q8_0) |
+| Database | MariaDB 11.8 (Debian packages) — **needs the local patches** |
 | Client data | [wowgaming/client-data](https://github.com/wowgaming/client-data) release v19 (maps/vmaps/mmaps/dbc) |
 
 ## Directory layout
 
 ```
 /home/admin/git/wow/
-├── README.md                     # this file
+├── README.md                     # this file (operating reference)
+├── docs/BOT-BEHAVIOR.md          # every bot system, in depth
+├── docs/BUILD-NOTES.md           # chronological journal, problems + fixes
 ├── DEPENDENCIES.txt              # every apt package + external dependency
 ├── build.sh                      # clone (first run) + compile + install
-├── restart-world.sh              # crash-restart loop for worldserver
+├── start.sh                      # tmux-mode start/stop/status (AC> consoles)
+├── reset-world.sh                # one-shot world wipe + reseed (see below)
+├── restart-world.sh              # crash-restart loop (legacy; systemd covers this)
+├── personalities.sql             # 42 custom personalities + playstyle mapping
+├── patches/                      # ALL changes to the nested repos (see its README)
+├── finetune/                     # wow-chat dataset generator + eval harness
+├── gpu-box/                      # Ollama serving + QLoRA training scripts
+├── systemd/                      # wow-auth / wow-world units (installed + enabled)
 ├── azerothcore-wotlk/            # sources (fork + modules/), build/ inside
 └── server/                       # runtime install (CMAKE_INSTALL_PREFIX)
-    ├── bin/                      # authserver, worldserver (run from here)
+    ├── bin/                      # authserver, worldserver, *.log
     ├── etc/                      # worldserver.conf, authserver.conf
     │   └── modules/              # playerbots.conf, mod_ollama_chat.conf
-    ├── data/                     # Cameras/ dbc/ maps/ mmaps/ vmaps/
-    └── bin/*.log                 # Server.log, Errors.log, Playerbots.log, Auth.log
+    └── data/                     # Cameras/ dbc/ maps/ mmaps/ vmaps/
 ```
 
 ## Running the server
 
-Two ways — don't mix them (the script refuses to start while the units are active):
+Two ways — don't mix them (each refuses to start over the other):
 
-**Manual with consoles** (day-to-day):
+**systemd** (default: boot autostart, crash restart, no console):
 
 ```bash
-./start.sh            # both servers in tmux, with AC> consoles
+sudo systemctl start|stop|restart|status wow-auth wow-world
+journalctl -u wow-world -f
+```
+
+**Manual with consoles** (when you want the `AC>` console):
+
+```bash
+sudo systemctl stop wow-auth wow-world   # if units are running
+./start.sh            # both servers in tmux
 ./start.sh status     # processes / ports / sessions
 ./start.sh stop       # graceful shutdown
+tmux attach -t world  # console (detach: Ctrl-b d)
 ```
 
-`tmux attach -t world` (or `-t auth`) for the console; detach with `Ctrl-b d`.
+MariaDB and Ollama are separate systemd services (also on boot).
 
-**systemd** (survives reboots, auto-restarts on crash, no console — use in-game
-GM commands instead). Units are installed at `/etc/systemd/system/` (tracked
-copies in `systemd/`) and **enabled**, so a reboot brings the realm up by itself:
+**Start the world over**: `./reset-world.sh` — asks for confirmation, then
+one-shot: wipes auth/characters/playerbots DBs, restarts, loads all 75
+personalities *before* the first bot rolls, recreates the `admin` GM account
+(password `changeme123`), sets the realm row, and relaunches authserver if it
+loses the first-boot DB race. `--no-start` wipes and leaves the realm down;
+`--full` also re-imports the static world DB. Bot re-seeding takes minutes on
+this box (the docs' "10-40 min" was the old machine).
 
-```bash
-sudo systemctl start|stop|status wow-auth wow-world
-journalctl -u wow-world -f        # server output
-```
+## Playing
 
-If you want console mode after a reboot: `sudo systemctl stop wow-auth wow-world`
-then `./start.sh`. MariaDB and Ollama are separate systemd services (also on boot).
-
-**Start the world over** (nuke all characters/bots/accounts, re-seed fresh):
-`./reset-world.sh` — asks for confirmation, then wipes, restarts, and
-auto-recreates the `admin` GM account (password `changeme123`). First boot
-after a wipe re-creates all bot characters (10-40 min). `--full` also
-re-imports the static world DB.
-
-### Quick test from the client
-
-1. **Is the server up?** `pgrep authserver worldserver` should show both, and
-   `ss -tln | grep -E "3724|8085"` both ports. Bots online:
-   `sudo mariadb -N -e "SELECT COUNT(*) FROM acore_characters.characters WHERE online=1;"`
-2. **No new user needed** — the `admin` account already exists (GM level 3,
-   initial password `changeme123`). Log in with it, create a character, `/who`
-   to see the bots.
-3. Local Wine client: the copy in the `~/.jwgui/prefixes/WoW` prefix is already
-   pointed at the realm. Launch with the input method disabled:
-   `XMODIFIERS="@im=none" WINEPREFIX=~/.jwgui/prefixes/WoW wine "C:\Program Files (x86)\World of Warcraft\Wow.exe"`
-
-### Accounts & realm
-
-- GM account: `admin` (gmlevel 3). The initial password was a placeholder — change it:
-  console `account set password admin <new> <new>`.
-- Create player accounts (e.g. for friends): `account create <name> <pass>` in the
-  worldserver console (`tmux attach -t world`), or as a GM in-game: `.account create <name> <pass>`.
-- Realm: `Gigi` at `127.0.0.1:8085` (world), auth on `3724`. Both bind `0.0.0.0`.
-  For WAN play, port-forward 3724 + 8085 and point the realm at your public IP/DDNS:
-  ```sql
-  UPDATE acore_auth.realmlist SET address='your.public.ip.or.ddns' WHERE id=1;
+- **This box**: launch **"World of Warcraft (Gigi)"** from the app menu /
+  Desktop shortcut, or:
+  ```bash
+  XMODIFIERS="@im=none" WINEPREFIX=~/.wine-wow wine /home/admin/git/wow/wotlk/wotlk/Wow.exe
   ```
-- Client side: WoW 3.3.5a enUS client, `Data/enUS/realmlist.wtf` → `set realmlist 127.0.0.1`.
+  Client is configured for 4K borderless (`gxMaximize`) with max UI scale;
+  `Config.wtf` carries the OpenGL + windowed fixes that prevent the
+  post-ToS freeze under Wine.
+- **Accounts**: `admin` (GM 3, initial password `changeme123` — change it:
+  console `account set password admin <new> <new>`). Create more:
+  `account create <name> <pass>` in the console or `.account create` in-game.
+- **Realm**: `Gigi` at `127.0.0.1:8085`, auth on `3724`, both bind
+  0.0.0.0. Client `Data/enUS/realmlist.wtf` → `set realmlist 127.0.0.1`.
+  For WAN play, port-forward 3724 + 8085 and point `acore_auth.realmlist` at
+  your public IP/DDNS.
 
 ## Databases
 
-MariaDB 11.8, user `acore` / password `acore` (localhost only). Databases:
-`acore_auth`, `acore_world`, `acore_characters`, plus the module's `acore_playerbots`.
-Schema updates apply automatically at worldserver startup (`Updates.AutoSetup=1`).
-InnoDB tuning lives in `/etc/mysql/mariadb.conf.d/60-azerothcore.cnf`.
+MariaDB 11.8, user `acore` / password `acore` (localhost only): `acore_auth`,
+`acore_world`, `acore_characters`, `acore_playerbots`. Schema updates apply at
+worldserver startup (`Updates.AutoSetup=1`). InnoDB tuning:
+`/etc/mysql/mariadb.conf.d/60-azerothcore.cnf` (6G buffer pool).
 
-Handy queries (Debian root uses unix_socket — use `sudo mariadb`):
+Handy queries (Debian root uses unix_socket — `sudo mariadb`):
 
 ```sql
 SELECT COUNT(*) FROM acore_characters.characters WHERE online=1;   -- bots in world
 SELECT level, COUNT(*) FROM acore_characters.characters WHERE online=1 GROUP BY level;
-SELECT COUNT(*) FROM acore_auth.account WHERE username LIKE 'RNDBOT%';
+SELECT playstyle, COUNT(*) FROM acore_characters.mod_ollama_chat_personality_templates GROUP BY playstyle;
 ```
 
 ## Configuration highlights
 
-All configs are the `.conf` files next to their `.conf.dist` templates (dist = documented
-defaults; conf = live values). Diff against the dist to see every local change.
+Live values are the `.conf` files next to their `.conf.dist` templates; diff
+against the dist to see every local change. Full explanation of the behavior
+keys: [docs/BOT-BEHAVIOR.md](docs/BOT-BEHAVIOR.md).
 
-**`server/etc/worldserver.conf`** — `DataDir` points at `server/data`, `MapUpdate.Threads = 4`.
+**`server/etc/modules/playerbots.conf`**:
 
-**`server/etc/modules/playerbots.conf`** — the "living world" settings:
+- `MinRandomBots / MaxRandomBots = 500`, fresh-realm leveling
+  (`DisableRandomLevels = 1`, `RandombotStartingLevel = 1` — lowercase `b` is
+  real), `EnableNewRpgStrategy = 1` (the living-world brain), BG/LFG/auto-gear
+  on.
+- **Playstyle profiles** (ours): `AiPlayerbot.RpgStatusProbWeight.<Profile>.<Status>`
+  overrides; defaults documented in the conf.
+- **Quest-help invites** (ours): `AiPlayerbot.QuestHelp{SentimentThreshold,ConfirmedChance,NearbyChance,RandomChance}`.
+- **Rated arena** (upstream, enabled): `RandomBotAutoJoinBGRatedArena2v2Count = 2`,
+  `3v3Count = 1`; teams auto-create when 70+ captains exist.
 
-- `MinRandomBots / MaxRandomBots = 250` — online bot population. The module keeps ~2×
-  that many characters total across auto-created `RNDBOT*` accounts.
-- Fresh realm: `DisableRandomLevels = 1`, `RandombotStartingLevel = 1` (note the lowercase
-  `b` — the key really is spelled that way), `RandomBotFixedLevel = 0` → everyone starts
-  at level 1 and levels naturally. Death Knight bots start at 55 (class minimum — expected).
-- `EnableNewRpgStrategy = 1` — bots autonomously wander, quest, grind, rest, train.
-- `RandomBotJoinBG = 1`, `RandomBotJoinLfg = 1`, `AutoUpgradeEquip = 1`,
-  `EquipAndSpecPersistence = 1`, `RandomBotTalk = 1`, `RandomBotSayWithoutMaster = 1`.
+**`server/etc/modules/mod_ollama_chat.conf`**:
 
-**`server/etc/modules/mod_ollama_chat.conf`** — LLM chat:
-
-- `Model = llama3.2:3b`, endpoint `http://localhost:11434/api/generate`.
-- `MaxConcurrentQueries = 2` — **do not set 0 (unlimited) on this CPU-only box**.
-- `EnableRPPersonalities = 1` (33 personalities), chat history 5 turns per bot/player pair.
-- Bots only chatter near *real* players (`RandomChatterRealPlayerDistance`), so Ollama is
-  idle until someone logs in.
+- `Model = wow-chat`, `Url = http://127.0.0.1:11434/api/generate`,
+  `MaxConcurrentQueries = 8`, `EnableTypingSimulation = 1`,
+  `OllamaChat.RequestTimeout = 120` (our conf key).
+- `ChatPromptTemplate` includes `{gear_context}` (our placeholder — bots
+  inspect the player they talk to).
+- `EnableRPPersonalities = 1`; sentiment tracking + our event nudges
+  (`SentimentEvent{Duel,Group,Guild}Adjustment`).
+- Bots only chatter near *real* players, so Ollama is idle until someone logs in.
 
 ## ⚠️ Local patches to the nested repos
 
-The fork and the chat module assume Oracle MySQL 8; this box runs MariaDB. All our
-changes to the nested clones (MariaDB compatibility + the module enhancements below)
-are captured as patch files in **`patches/`** with apply/regenerate instructions.
-After any `git pull` / `./build.sh --update` in the nested repos, re-apply from
-there before rebuilding. See `patches/README.md` for the full change list.
+The nested clones (core fork + both modules) carry substantial local changes,
+captured as **three patch files in `patches/`** with apply/regenerate
+instructions in `patches/README.md`:
 
-Debugging tip: a worldserver "segfault at 0 … error 6" in `dmesg` is AzerothCore's
-`WPFatal` assertion (a deliberate null write), not memory corruption — the real message
-is in `server/bin/Errors.log`.
+1. `azerothcore-mariadb-compat.patch` — build/run on MariaDB instead of MySQL 8.
+2. `mod-ollama-chat-enhancements.patch` — MariaDB fix, per-personality behavior
+   columns, sentiment event nudges, `{gear_context}`, playstyle migration,
+   guild-hook registration bugfix, `RequestTimeout`.
+3. `mod-playerbots-playstyles.patch` — playstyle profiles, arena coordination,
+   quest-help invites.
 
-## Personalities & relationships (our module extensions)
+**After any `git pull` in the nested repos, re-apply before rebuilding.**
+Rebuild: `cd azerothcore-wotlk/build && make -j8 install` (incremental;
+full toolchain in `DEPENDENCIES.txt`), then restart worldserver.
 
-- **73 personalities** live in `acore_characters.mod_ollama_chat_personality_templates`
-  (33 upstream + 40 from `personalities.sql`). Rows hot-reload with `.ollama reload`.
-- **Per-personality behavior columns** (our addition): `weight` (assignment
-  commonness), `reply_chance_multiplier` (talkativeness — the one-word grunter is
-  0.6×, the LFG spammer 2×), `num_predict_override` (verbosity cap),
-  `temperature_override` (chaos — stoic paladin 0.5, unhinged troll 1.3).
-- **Stable core, evolving relationships**: a bot's personality never changes once
-  assigned; the *sentiment* system (enabled) tracks per-pair relationship scores
-  that shift from chat tone and world events — duels sour a pair, grouping and
-  guild joins warm them (`OllamaChat.SentimentEvent*Adjustment`). Inspect with
-  `.ollama sentiment view <bot> <player>`.
-- New conf key `OllamaChat.RequestTimeout` (HTTP timeout to Ollama, default 120 s).
+Debugging tip: a worldserver "segfault at 0 … error 6" in `dmesg` is
+AzerothCore's `WPFatal` assertion, not memory corruption — the real message is
+in `server/bin/Errors.log`.
 
-## GPU box & fine-tuning
+## The wow-chat model & fine-tuning
 
-`gpu-box/` has numbered scripts for the 7900XT machine: Ollama serving on the LAN
-(Qwen3-4B, 100+ tok/s), then a QLoRA fine-tune pipeline (Unsloth/ROCm) that trains
-the `wow-chat` voice model on the synthetic dataset in `finetune/` and exports it
-back into Ollama. `gpu-box/apply-gpu-config.sh <ip>` flips the realm onto the GPU.
+`wow-chat` (Ollama alias → Q8_0 quant of our QLoRA fine-tune of
+Qwen3-4B-Instruct) is what the bots speak through. The previous model is
+always kept as `wow-chat:v1` — **rollback is
+`ollama cp wow-chat:v1 wow-chat`**, no server restart needed.
 
-## Updating
-
-```bash
-cd /home/admin/git/wow
-./build.sh --update        # git pull core + both modules, rebuild, make install
-# then: check the three patches survived (git diff), restart worldserver
-```
-
-If a pull conflicts with or reverts a patch, re-apply it (details above) before building.
+Retraining (new personalities, new context types): edit
+`finetune/generate_dataset.py`, regenerate, train on this box (~55 min), and
+**follow the staged deploy in `finetune/README.md`** — one training round
+produced a corrupted model with a perfectly clean loss curve; the coherence
+gate exists for a reason.
 
 ## Monitoring & tuning
 
-- Console `server info` → *Update time diff*: <50 ms great, >150 ms sustained = reduce load.
-- `tail -f server/bin/Playerbots.log` — bot activity; `Errors.log` — problems.
-- LLM chat: `journalctl -u ollama -f` shows generate requests when bots talk to you.
-- Scale the world: raise `MinRandomBots`/`MaxRandomBots` (this box has headroom for
-  500–1000; new bot characters are created automatically on next boot). If update diffs
-  climb or chat lags, switch `OllamaChat.Model` to `llama3.2:1b` first — it's the cheaper lever.
+- Console `server info` → *Update time diff*: <50 ms great (this box idles at
+  1 ms with 500 bots).
+- `tail -f server/bin/Playerbots.log` — bot activity; `grep "\[Playstyle\]"`,
+  `"\[QuestHelp\]"`, `"\[Arena\]"` for our systems; `Errors.log` — problems.
+- `journalctl -u ollama -f` — chat generations when players are near bots.
+- Scale: raise `MinRandomBots`/`MaxRandomBots` (headroom for 1000+ here); new
+  bot characters are created automatically on next boot.
 
 ## Rough resource picture
 
-250 bots idle at ~1 ms update diff; worldserver RAM grows toward ~8–11 GB as bots explore
-more maps (maps never unload). Ollama holds the 3b model resident (~3 GB,
-`OLLAMA_KEEP_ALIVE=-1`). MariaDB buffer pool is capped at 6 GB.
+500 bots: 1–5 ms update diff; worldserver RAM grows toward ~8–11 GB as bots
+explore (maps never unload). Ollama holds wow-chat resident (~5 GB VRAM,
+`OLLAMA_KEEP_ALIVE=-1`); QLoRA training peaks ~17.5 GB VRAM — evict resident
+models first (`ollama stop wow-chat`). MariaDB buffer pool capped at 6 GB.
