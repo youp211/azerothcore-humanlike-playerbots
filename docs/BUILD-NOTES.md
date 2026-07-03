@@ -421,3 +421,17 @@ freeze).
 | Realm chat suddenly incoherent after model deploy | bad model reached the `wow-chat` alias | `ollama cp wow-chat:v1 wow-chat` (instant rollback) |
 | Client window cropped / UI microscopic at 4K | native-res window without maximize/uiScale | gxMaximize 1 + useUiScale 1 (Section 19) |
 | Old model still resident in VRAM after re-alias | keep_alive=-1 runners keyed by digest | `sudo systemctl restart ollama`, warm once |
+
+## 20. Hostname addressing, env-var secrets, generic GM account (2026-07-03)
+
+- **`gigi.local`**: `/etc/hosts` pins `127.0.0.1 gigi.local`; the client's
+  `realmlist.wtf` says `set realmlist gigi.local` permanently. Combined with
+  `acore_auth.realmlist.localAddress = 127.0.0.1` (loopback clients get
+  loopback back from the realm list).
+- **`.env` / `.env.example`**: GM account name/password and realm name moved
+  out of the scripts into `WOW_GM_ACCOUNT` / `WOW_GM_PASSWORD` /
+  `WOW_REALM_NAME` — `.env` is gitignored, `.env.example` carries safe
+  defaults, so nothing personal needs committing.
+- **GM account renamed `admin` → `admin`** (SRP6 verifier binds the username,
+  so the rename required recomputing salt+verifier — password reset to the
+  default in the process; characters ride along on the account row).

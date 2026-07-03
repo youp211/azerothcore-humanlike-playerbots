@@ -87,29 +87,40 @@ MariaDB and Ollama are separate systemd services (also on boot).
 
 **Start the world over**: `./reset-world.sh` — asks for confirmation, then
 one-shot: wipes auth/characters/playerbots DBs, restarts, loads all 75
-personalities *before* the first bot rolls, recreates the `admin` GM account
-(password `changeme123`), sets the realm row, and relaunches authserver if it
-loses the first-boot DB race. `--no-start` wipes and leaves the realm down;
-`--full` also re-imports the static world DB. Bot re-seeding takes minutes on
-this box (the docs' "10-40 min" was the old machine).
+personalities *before* the first bot rolls, recreates the GM account, sets the
+realm row (name + current IP + loopback localAddress), and relaunches
+authserver if it loses the first-boot DB race. `--no-start` wipes and leaves
+the realm down; `--full` also re-imports the static world DB. Bot re-seeding
+takes minutes on this box (the docs' "10-40 min" was the old machine).
+
+**Secrets / user-specific settings** live in `.env` (gitignored — copy
+`.env.example`): GM account name + password, realm name. Scripts fall back to
+the example defaults (`admin` / `changeme123` / `Gigi`) when no `.env` exists.
 
 ## Playing
 
 - **This box**: launch **"World of Warcraft (Gigi)"** from the app menu /
-  Desktop shortcut, or:
-  ```bash
-  XMODIFIERS="@im=none" WINEPREFIX=~/.wine-wow wine /home/admin/git/wow/wotlk/wotlk/Wow.exe
-  ```
+  Desktop shortcut. The shortcut runs **`launch-client.sh`**, which
+  self-heals before starting the game: this box is on **DHCP**, so the IP can
+  drift ("unable to connect" at login) — the launcher rewrites the client's
+  `realmlist.wtf` to the current IP, fixes `acore_auth.realmlist` + bounces
+  authserver if stale, and clears the client's `Cache/WDB`. (`reset-world.sh`
+  also derives the IP dynamically now.) Re-create the shortcut any time —
+  e.g. after moving the repo — with `./install-shortcut.sh`.
   Client is configured for 4K borderless (`gxMaximize`) with max UI scale;
   `Config.wtf` carries the OpenGL + windowed fixes that prevent the
   post-ToS freeze under Wine.
 - **Accounts**: `admin` (GM 3, initial password `changeme123` — change it:
-  console `account set password admin <new> <new>`). Create more:
-  `account create <name> <pass>` in the console or `.account create` in-game.
-- **Realm**: `Gigi` at `127.0.0.1:8085`, auth on `3724`, both bind
-  0.0.0.0. Client `Data/enUS/realmlist.wtf` → `set realmlist 127.0.0.1`.
-  For WAN play, port-forward 3724 + 8085 and point `acore_auth.realmlist` at
-  your public IP/DDNS.
+  console `account set password admin <new> <new>`; defaults configurable via
+  `.env`). Create more: `account create <name> <pass>` in the console or
+  `.account create` in-game.
+- **Realm addressing**: the local client connects to **`gigi.local`** — pinned
+  to `127.0.0.1` in `/etc/hosts` — so it is immune to DHCP address changes;
+  the realm row's `localAddress=127.0.0.1` routes loopback clients back to
+  loopback for the world server. Other LAN devices use the box's current IP
+  (the launcher keeps the realm row's external `address` up to date). Auth on
+  `3724`, world on `8085`, both bind 0.0.0.0. For WAN play, port-forward both
+  and point `acore_auth.realmlist.address` at your public IP/DDNS.
 
 ## Databases
 

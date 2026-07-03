@@ -15,6 +15,7 @@ finetune/*.gguf
 # WoW game client folders and download parts (user's, 50+ GB)
 wotlk*
 
+.env
 
 __pycache__/
 *.pyc

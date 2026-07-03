@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Completely wipe the realm and start over: all characters, bots, accounts,
 # guilds, auction house, chat history, sentiment - gone. The world re-seeds
-# itself on the next boot (fresh level-1 bots), the full 73-personality pool
-# is re-applied before bots roll their assignments, and the 'admin' GM account
-# is recreated automatically (password: changeme123).
+# itself on the next boot (fresh level-1 bots), the full personality pool is
+# re-applied before bots roll their assignments, and the GM account is
+# recreated automatically (name/password from .env, default admin/changeme123).
 #
 #   ./reset-world.sh          wipe auth + characters + playerbots DBs
 #   ./reset-world.sh --full   also drop acore_world (static content re-imports
@@ -13,6 +13,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Secure/user-specific settings come from .env (gitignored; see .env.example)
+[ -f "$ROOT/.env" ] && . "$ROOT/.env"
+GM_ACCOUNT="${WOW_GM_ACCOUNT:-admin}"
+GM_PASSWORD="${WOW_GM_PASSWORD:-changeme123}"
+REALM_NAME="${WOW_REALM_NAME:-Gigi}"
+
 FULL=0
 NO_START=0
 for arg in "$@"; do
@@ -55,7 +62,7 @@ EOF
 if [ "$NO_START" = 1 ]; then
     echo
     echo "Wiped. Realm left DOWN (--no-start). When you start it (./start.sh or"
-    echo "systemd), the world re-imports and re-seeds itself; then the admin"
+    echo "systemd), the world re-imports and re-seeds itself; then the GM"
     echo "account, realm row, and the 73-personality pool still need applying -"
     echo "this script's tail does all three (or run it without --no-start next"
     echo "time for the full cycle)."
@@ -79,7 +86,7 @@ done
 sudo mariadb acore_characters < "$ROOT/personalities.sql"
 echo "personalities loaded: $(sudo mariadb -N -e "SELECT COUNT(*) FROM acore_characters.mod_ollama_chat_personality_templates;") templates"
 
-echo "== Waiting for the auth schema, then recreating the admin account =="
+echo "== Waiting for the auth schema, then recreating the GM account =="
 until sudo mariadb -N -e "SELECT 1 FROM acore_auth.account LIMIT 1;" > /dev/null 2>&1; do
     pgrep -x worldserver > /dev/null || { echo "worldserver died during import - check server/bin/Errors.log"; exit 1; }
     sleep 15
@@ -94,11 +101,12 @@ if ! pgrep -x authserver > /dev/null; then
     echo "authserver relaunched (lost the first-boot DB race)"
 fi
 
-python3 - <<'EOF'
+GM_ACCOUNT="$GM_ACCOUNT" GM_PASSWORD="$GM_PASSWORD" python3 - <<'EOF'
 import hashlib, os, subprocess
 # AzerothCore SRP6: v = g^SHA1(salt || SHA1(USER:PASS)) mod N, little-endian
 N = int("894B645E89E1535BBDAD5B8B290650530801B18EBFBF5E8FAB3C82872A3E9BB7", 16)
-user, pw = "ADMIN", "CHANGEME123"
+user = os.environ["GM_ACCOUNT"].upper()
+pw = os.environ["GM_PASSWORD"].upper()
 salt = os.urandom(32)
 h = hashlib.sha1(salt + hashlib.sha1(f"{user}:{pw}".encode()).digest()).digest()
 v = pow(7, int.from_bytes(h, "little"), N).to_bytes(32, "little")
@@ -111,11 +119,13 @@ sql = (
     f"ON DUPLICATE KEY UPDATE gmlevel=3;"
 )
 subprocess.run(["sudo", "mariadb", "-e", sql], check=True)
-print("account 'admin' recreated (password: changeme123, GM level 3)")
+print(f"GM account '{user.lower()}' recreated (GM level 3)")
 EOF
 
 echo "== Restoring realm name/address =="
-sudo mariadb -e "UPDATE acore_auth.realmlist SET name='Gigi', address='127.0.0.1' WHERE id=1;"
+# The box is on DHCP - derive the current IP rather than hardcoding one
+REALM_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')"
+sudo mariadb -e "UPDATE acore_auth.realmlist SET name='$REALM_NAME', address='${REALM_IP:-127.0.0.1}', localAddress='127.0.0.1' WHERE id=1;"
 
 # In case the module read the templates before our insert landed, hot-reload
 # them; template reload is safe live (assignments are unaffected).
@@ -126,4 +136,4 @@ fi
 echo
 echo "Wipe complete. The world is re-seeding: watch bots appear with"
 echo "  sudo mariadb -N -e \"SELECT COUNT(*) FROM acore_characters.characters WHERE online=1;\""
-echo "Log in as admin / changeme123 once bots start showing up."
+echo "Log in as $GM_ACCOUNT once bots start showing up."
