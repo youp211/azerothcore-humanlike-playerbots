@@ -12,6 +12,8 @@ LLM inference offloads to a second machine (RX 7900 XT) — see `gpu-box/README.
 Repo layout: work was developed on branches (`gpu-box`, `ollama-chat-mods`,
 `personalities`, `finetune`) merged into `main`.
 
+**Full build history, every problem hit and its fix: [docs/BUILD-NOTES.md](docs/BUILD-NOTES.md).**
+
 ## Stack
 
 | Component | What / where |
@@ -64,6 +66,12 @@ journalctl -u wow-world -f        # server output
 
 If you want console mode after a reboot: `sudo systemctl stop wow-auth wow-world`
 then `./start.sh`. MariaDB and Ollama are separate systemd services (also on boot).
+
+**Start the world over** (nuke all characters/bots/accounts, re-seed fresh):
+`./reset-world.sh` — asks for confirmation, then wipes, restarts, and
+auto-recreates the `admin` GM account (password `changeme123`). First boot
+after a wipe re-creates all bot characters (10-40 min). `--full` also
+re-imports the static world DB.
 
 ### Quick test from the client
 
