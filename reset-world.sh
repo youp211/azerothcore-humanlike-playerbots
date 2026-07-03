@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Completely wipe the realm and start over: all characters, bots, accounts,
 # guilds, auction house, chat history, sentiment - gone. The world re-seeds
-# itself on the next boot (fresh level-1 bots), and the 'admin' GM account is
-# recreated automatically (password: changeme123).
+# itself on the next boot (fresh level-1 bots), the full 73-personality pool
+# is re-applied before bots roll their assignments, and the 'admin' GM account
+# is recreated automatically (password: changeme123).
 #
 #   ./reset-world.sh          wipe auth + characters + playerbots DBs
 #   ./reset-world.sh --full   also drop acore_world (static content re-imports
@@ -13,7 +14,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FULL=0
-[ "${1:-}" = "--full" ] && FULL=1
+NO_START=0
+for arg in "$@"; do
+    case "$arg" in
+    --full)     FULL=1 ;;
+    --no-start) NO_START=1 ;;   # wipe only; leave the realm down
+    *) echo "unknown option: $arg"; exit 1 ;;
+    esac
+done
 
 echo "This will PERMANENTLY DELETE all characters, bots, accounts and world state."
 [ "$FULL" = 1 ] && echo "(--full: the static world DB will also be dropped and re-imported.)"
@@ -44,9 +52,32 @@ GRANT ALL PRIVILEGES ON acore_world.*      TO 'acore'@'localhost';
 FLUSH PRIVILEGES;
 EOF
 
+if [ "$NO_START" = 1 ]; then
+    echo
+    echo "Wiped. Realm left DOWN (--no-start). When you start it (./start.sh or"
+    echo "systemd), the world re-imports and re-seeds itself; then the admin"
+    echo "account, realm row, and the 73-personality pool still need applying -"
+    echo "this script's tail does all three (or run it without --no-start next"
+    echo "time for the full cycle)."
+    exit 0
+fi
+
 echo "== Starting servers (first boot re-imports everything; RNDBOT creation"
 echo "   takes 10-40 min of console spam - it is NOT hung) =="
 "$ROOT/start.sh" start
+
+echo "== Waiting for the personality templates table, then loading all 73 =="
+# The wipe drops the module's personality templates with the rest of the
+# characters DB; re-apply the 40 extra archetypes the moment the module's SQL
+# updater recreates the table, so bots roll from the weighted 73 pool from the
+# first login instead of the upstream 33 (which otherwise requires a
+# clear-assignments-and-restart dance later).
+until sudo mariadb -N -e "SELECT 1 FROM acore_characters.mod_ollama_chat_personality_templates LIMIT 1;" > /dev/null 2>&1; do
+    pgrep -x worldserver > /dev/null || { echo "worldserver died during import - check server/bin/Errors.log"; exit 1; }
+    sleep 5
+done
+sudo mariadb acore_characters < "$ROOT/personalities.sql"
+echo "personalities loaded: $(sudo mariadb -N -e "SELECT COUNT(*) FROM acore_characters.mod_ollama_chat_personality_templates;") templates"
 
 echo "== Waiting for the auth schema, then recreating the admin account =="
 until sudo mariadb -N -e "SELECT 1 FROM acore_auth.account LIMIT 1;" > /dev/null 2>&1; do
@@ -76,6 +107,12 @@ EOF
 
 echo "== Restoring realm name/address =="
 sudo mariadb -e "UPDATE acore_auth.realmlist SET name='Gigi', address='127.0.0.1' WHERE id=1;"
+
+# In case the module read the templates before our insert landed, hot-reload
+# them; template reload is safe live (assignments are unaffected).
+if tmux has-session -t world 2>/dev/null; then
+    tmux send-keys -t world 'ollama reload' Enter
+fi
 
 echo
 echo "Wipe complete. The world is re-seeding: watch bots appear with"

@@ -59,6 +59,34 @@ index 0000000..7ddb619
 +    ADD COLUMN `reply_chance_multiplier` FLOAT NOT NULL DEFAULT 1.0 AFTER `weight`,
 +    ADD COLUMN `num_predict_override` INT UNSIGNED NULL DEFAULT NULL AFTER `reply_chance_multiplier`,
 +    ADD COLUMN `temperature_override` FLOAT NULL DEFAULT NULL AFTER `num_predict_override`;
+diff --git a/data/sql/characters/base/2026_07_03_personality_playstyle.sql b/data/sql/characters/base/2026_07_03_personality_playstyle.sql
+new file mode 100644
+index 0000000..5e6b5d7
+--- /dev/null
++++ b/data/sql/characters/base/2026_07_03_personality_playstyle.sql
+@@ -0,0 +1,22 @@
++-- Playstyle: gameplay profile consumed by mod-playerbots' New RPG strategy
++-- (per-personality activity weights: what a bot *does*, not just how it talks).
++-- Values: default | grinder | quester | socializer | explorer | pvper | idler
++-- Weight tables live in playerbots config (AiPlayerbot.RpgStatusProbWeight.<Profile>.*).
++ALTER TABLE `mod_ollama_chat_personality_templates`
++    ADD COLUMN IF NOT EXISTS `playstyle` VARCHAR(16) NOT NULL DEFAULT 'default';
++
++-- Map the upstream 33 personalities onto profiles (the 40 archetypes from
++-- personalities.sql carry their own mapping there).
++UPDATE `mod_ollama_chat_personality_templates` SET `playstyle` = 'grinder'
++    WHERE `key` IN ('GAMER', 'LOOTGOBLIN', 'LONE_WOLF');
++UPDATE `mod_ollama_chat_personality_templates` SET `playstyle` = 'quester'
++    WHERE `key` IN ('FANATIC', 'YOUNG_APPRENTICE');
++UPDATE `mod_ollama_chat_personality_templates` SET `playstyle` = 'socializer'
++    WHERE `key` IN ('ROLEPLAYER', 'TRADER', 'BARD', 'HYPE_MAN', 'FLIRT', 'MENTOR', 'GOBLIN_MERCHANT', 'CHEF');
++UPDATE `mod_ollama_chat_personality_templates` SET `playstyle` = 'explorer'
++    WHERE `key` IN ('TRICKSTER', 'FOOL', 'CONSPIRACY_THEORIST', 'SCHOLAR', 'PIRATE', 'POET', 'GLITCHED_AI');
++UPDATE `mod_ollama_chat_personality_templates` SET `playstyle` = 'pvper'
++    WHERE `key` IN ('PVP_HARDCORE', 'HEROIC_LEADER', 'EDGE_LORD', 'RAGER', 'WANNABE_VILLAIN');
++UPDATE `mod_ollama_chat_personality_templates` SET `playstyle` = 'idler'
++    WHERE `key` IN ('NPC_IMPERSONATOR', 'GRUMPY_VETERAN', 'ANCIENT_WISE_ONE', 'PARANOID', 'STONER', 'JOLLY_BEER_LOVER');
++-- RAIDER and CASUAL stay 'default' (balanced mix)
 diff --git a/src/mod-ollama-chat_api.cpp b/src/mod-ollama-chat_api.cpp
 index 271077d..a4cc11f 100644
 --- a/src/mod-ollama-chat_api.cpp

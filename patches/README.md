@@ -9,6 +9,7 @@ a `git pull`/`checkout` in the nested repos clobbers the working tree.
 ```bash
 cd azerothcore-wotlk && git apply /home/admin/git/wow/patches/azerothcore-mariadb-compat.patch
 cd modules/mod-ollama-chat && git apply /home/admin/git/wow/patches/mod-ollama-chat-enhancements.patch
+cd ../mod-playerbots && git apply /home/admin/git/wow/patches/mod-playerbots-playstyles.patch
 ```
 
 (`git apply --check` first to test; conflicts mean upstream moved — re-resolve by hand.)
@@ -18,6 +19,7 @@ cd modules/mod-ollama-chat && git apply /home/admin/git/wow/patches/mod-ollama-c
 ```bash
 cd azerothcore-wotlk && git diff -- src/server/database > ../patches/azerothcore-mariadb-compat.patch
 cd modules/mod-ollama-chat && git add -N data/sql/characters/base/*.sql && git diff > ../../../patches/mod-ollama-chat-enhancements.patch
+cd ../mod-playerbots && git diff > ../../../patches/mod-playerbots-playstyles.patch
 ```
 
 ## Contents
@@ -36,3 +38,15 @@ cd modules/mod-ollama-chat && git add -N data/sql/characters/base/*.sql && git d
   (`SentimentOnGroup` GroupScript), conf keys `SentimentEventGroup/Guild/DuelAdjustment`
 - Bugfix: `ChatOnGuildMemberChange` was never registered in `main.cpp` — guild
   event hooks never fired upstream; now registered
+- Playstyle column migration (`2026_07_03_personality_playstyle.sql`): adds
+  `playstyle` to the personality templates + maps the upstream 33 personalities
+  (the 40 custom ones are mapped in `personalities.sql`)
+
+**mod-playerbots-playstyles.patch** — per-personality gameplay:
+- Six RPG weight profiles (grinder/quester/socializer/explorer/pvper/idler) in
+  `PlayerbotAIConfig`, tunable via `AiPlayerbot.RpgStatusProbWeight.<Profile>.<Status>`
+- `NewRpgBaseAction::RandomChangeStatus` resolves the bot's playstyle from its
+  mod-ollama-chat personality (shared `acore_characters` DB, cached per guid,
+  5-min retry on miss) and rolls activities from that profile's weights
+- Degrades gracefully: no playstyle column / no personality / chat module
+  disabled → global weights, zero queries after the first probe

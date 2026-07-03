@@ -66,4 +66,24 @@ INSERT INTO `mod_ollama_chat_personality_templates`
 ('UNHINGED_TROLL', 'You are a chaotic wind-up merchant. Absurd hot takes, playful bait, nonsense conspiracy about game mechanics, never actually mean or targeting anyone specific, just unfiltered chaos.', 0, 30, 1.3, 30, 1.3),
 ('FAIRWEATHER_FRIEND', 'You are extremely friendly to whoever seems useful and dismissive when they are not. Compliment gear of high levels, angle for dungeon carries, transparently transactional but charming.', 0, 40, 1.1, NULL, NULL);
 
+-- ---------------------------------------------------------------------------
+-- Playstyles: gameplay profile per personality, consumed by mod-playerbots'
+-- New RPG strategy (requires the playstyle column from the module migration
+-- 2026_07_03_personality_playstyle.sql, which also maps the upstream 33).
+-- Unlisted keys keep 'default' (the global RpgStatusProbWeight mix).
+-- ---------------------------------------------------------------------------
+UPDATE `mod_ollama_chat_personality_templates` SET `playstyle` = 'grinder'
+    WHERE `key` IN ('MIN_MAXER', 'HUMBLE_FARMER', 'GOLD_FARMER', 'SILENT_TYPE', 'ONE_WORD_GRUNTER');
+UPDATE `mod_ollama_chat_personality_templates` SET `playstyle` = 'quester'
+    WHERE `key` IN ('QUEST_WHINER', 'SPEEDRUNNER', 'SCARED_NEWBIE', 'KEYBOARD_TURNER', 'STOIC_PALADIN');
+UPDATE `mod_ollama_chat_personality_templates` SET `playstyle` = 'socializer'
+    WHERE `key` IN ('LFG_SPAMMER', 'TRADE_COMEDIAN', 'GUILD_RECRUITER', 'DRAMA_QUEEN', 'EMOTE_SPAMMER', 'WOW_MOM', 'FAIRWEATHER_FRIEND');
+UPDATE `mod_ollama_chat_personality_templates` SET `playstyle` = 'explorer'
+    WHERE `key` IN ('LORE_NERD', 'ACHIEVEMENT_HUNTER', 'EXPLORER', 'GATHERER', 'WANDERING_RP');
+UPDATE `mod_ollama_chat_personality_templates` SET `playstyle` = 'pvper'
+    WHERE `key` IN ('PVP_TRASHTALKER', 'DUELIST', 'UNHINGED_TROLL');
+UPDATE `mod_ollama_chat_personality_templates` SET `playstyle` = 'idler'
+    WHERE `key` IN ('THEORYCRAFTER', 'CHILL_DAD', 'FISHERMAN', 'CLASS_DOOMER', 'BANK_ALT', 'NIGHT_OWL');
+
 SELECT COUNT(*) AS total_personalities FROM `mod_ollama_chat_personality_templates`;
+SELECT `playstyle`, COUNT(*) AS n FROM `mod_ollama_chat_personality_templates` GROUP BY `playstyle`;
