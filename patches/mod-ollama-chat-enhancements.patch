@@ -77,102 +77,6 @@ index b600032..3b31a1b 100644
  
  # OllamaChat.ChatExtraInfoTemplate
  #   Description: The context/details string about the bot and player, injected into the chat prompt as the last parameter.
-diff --git a/data/sql/characters/base/2026_07_02_personality_behavior_columns.sql b/data/sql/characters/base/2026_07_02_personality_behavior_columns.sql
-new file mode 100644
-index 0000000..7ddb619
---- /dev/null
-+++ b/data/sql/characters/base/2026_07_02_personality_behavior_columns.sql
-@@ -0,0 +1,5 @@
-+ALTER TABLE `mod_ollama_chat_personality_templates`
-+    ADD COLUMN `weight` INT UNSIGNED NOT NULL DEFAULT 100 AFTER `manual_only`,
-+    ADD COLUMN `reply_chance_multiplier` FLOAT NOT NULL DEFAULT 1.0 AFTER `weight`,
-+    ADD COLUMN `num_predict_override` INT UNSIGNED NULL DEFAULT NULL AFTER `reply_chance_multiplier`,
-+    ADD COLUMN `temperature_override` FLOAT NULL DEFAULT NULL AFTER `num_predict_override`;
-diff --git a/data/sql/characters/base/2026_07_03_event_memories.sql b/data/sql/characters/base/2026_07_03_event_memories.sql
-new file mode 100644
-index 0000000..c84fa0e
---- /dev/null
-+++ b/data/sql/characters/base/2026_07_03_event_memories.sql
-@@ -0,0 +1,17 @@
-+-- Bot event-memory subsystem: bounded, structured memories a random bot keeps
-+-- about a REAL, currently-guilded player (duel, group, guild, shared
-+-- arena/battleground). Storage is bounded two ways -- at most N rows per
-+-- (bot_guid, player_guid) pair, and rows are purged entirely when the player
-+-- leaves their guild -- so NO row compression is needed here; the bounding plus
-+-- guilded-only recording IS the performance strategy.
-+CREATE TABLE IF NOT EXISTS mod_ollama_chat_event_memories (
-+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-+    bot_guid BIGINT UNSIGNED NOT NULL,
-+    player_guid BIGINT UNSIGNED NOT NULL,
-+    event_type VARCHAR(24) NOT NULL COMMENT 'Structured tag: duel, group, guild, arena, battleground, trade',
-+    detail VARCHAR(128) NOT NULL DEFAULT '' COMMENT 'Short human phrase, e.g. "were on an arena team with them"',
-+    zone VARCHAR(48) NOT NULL DEFAULT '' COMMENT 'Zone name where the moment happened',
-+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-+    -- Primary lookup path for recall and pruning is by (bot, player).
-+    KEY idx_bot_player (bot_guid, player_guid)
-+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-diff --git a/data/sql/characters/base/2026_07_03_personality_gear_give.sql b/data/sql/characters/base/2026_07_03_personality_gear_give.sql
-new file mode 100644
-index 0000000..fa77423
---- /dev/null
-+++ b/data/sql/characters/base/2026_07_03_personality_gear_give.sql
-@@ -0,0 +1,28 @@
-+-- Chance (percent, rolled per gear-inspect context, subject to per-bot and
-+-- per-pair cooldowns) that a bot with a suitable spare item ACTUALLY mails it
-+-- to the player it is talking to. Seller personalities send it COD instead of
-+-- gifting (see IsGearSeller in mod-ollama-chat_handler.cpp).
-+ALTER TABLE `mod_ollama_chat_personality_templates`
-+    ADD COLUMN IF NOT EXISTS `gear_give_chance` FLOAT NOT NULL DEFAULT 2.0;
-+
-+-- Upstream-33 tuning (the custom personalities are tuned in personalities.sql)
-+UPDATE `mod_ollama_chat_personality_templates` SET `gear_give_chance` = 12
-+    WHERE `key` IN ('TRADER', 'GOBLIN_MERCHANT');
-+UPDATE `mod_ollama_chat_personality_templates` SET `gear_give_chance` = 8
-+    WHERE `key` IN ('MENTOR', 'JOLLY_BEER_LOVER', 'HEROIC_LEADER');
-+UPDATE `mod_ollama_chat_personality_templates` SET `gear_give_chance` = 6
-+    WHERE `key` IN ('LOOTGOBLIN', 'CASUAL');
-+UPDATE `mod_ollama_chat_personality_templates` SET `gear_give_chance` = 1
-+    WHERE `key` IN ('GRUMPY_VETERAN', 'EDGE_LORD', 'WANNABE_VILLAIN', 'RAGER', 'PARANOID', 'TRICKSTER');
-+
-+-- In-person hand-overs: a give to a stranger (no shared guild/group) parks the
-+-- item here; mod-playerbots completes it when the player opens a trade window
-+-- with the bot. Rows older than 10 minutes are ignored.
-+CREATE TABLE IF NOT EXISTS `mod_ollama_chat_pending_gives` (
-+    `bot_guid` BIGINT UNSIGNED NOT NULL,
-+    `player_guid` BIGINT UNSIGNED NOT NULL,
-+    `item_guid` BIGINT UNSIGNED NOT NULL,
-+    `cod` INT UNSIGNED NOT NULL DEFAULT 0,
-+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-+    PRIMARY KEY (`bot_guid`, `player_guid`)
-+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-diff --git a/data/sql/characters/base/2026_07_03_personality_playstyle.sql b/data/sql/characters/base/2026_07_03_personality_playstyle.sql
-new file mode 100644
-index 0000000..5e6b5d7
---- /dev/null
-+++ b/data/sql/characters/base/2026_07_03_personality_playstyle.sql
-@@ -0,0 +1,22 @@
-+-- Playstyle: gameplay profile consumed by mod-playerbots' New RPG strategy
-+-- (per-personality activity weights: what a bot *does*, not just how it talks).
-+-- Values: default | grinder | quester | socializer | explorer | pvper | idler
-+-- Weight tables live in playerbots config (AiPlayerbot.RpgStatusProbWeight.<Profile>.*).
-+ALTER TABLE `mod_ollama_chat_personality_templates`
-+    ADD COLUMN IF NOT EXISTS `playstyle` VARCHAR(16) NOT NULL DEFAULT 'default';
-+
-+-- Map the upstream 33 personalities onto profiles (the 40 archetypes from
-+-- personalities.sql carry their own mapping there).
-+UPDATE `mod_ollama_chat_personality_templates` SET `playstyle` = 'grinder'
-+    WHERE `key` IN ('GAMER', 'LOOTGOBLIN', 'LONE_WOLF');
-+UPDATE `mod_ollama_chat_personality_templates` SET `playstyle` = 'quester'
-+    WHERE `key` IN ('FANATIC', 'YOUNG_APPRENTICE');
-+UPDATE `mod_ollama_chat_personality_templates` SET `playstyle` = 'socializer'
-+    WHERE `key` IN ('ROLEPLAYER', 'TRADER', 'BARD', 'HYPE_MAN', 'FLIRT', 'MENTOR', 'GOBLIN_MERCHANT', 'CHEF');
-+UPDATE `mod_ollama_chat_personality_templates` SET `playstyle` = 'explorer'
-+    WHERE `key` IN ('TRICKSTER', 'FOOL', 'CONSPIRACY_THEORIST', 'SCHOLAR', 'PIRATE', 'POET', 'GLITCHED_AI');
-+UPDATE `mod_ollama_chat_personality_templates` SET `playstyle` = 'pvper'
-+    WHERE `key` IN ('PVP_HARDCORE', 'HEROIC_LEADER', 'EDGE_LORD', 'RAGER', 'WANNABE_VILLAIN');
-+UPDATE `mod_ollama_chat_personality_templates` SET `playstyle` = 'idler'
-+    WHERE `key` IN ('NPC_IMPERSONATOR', 'GRUMPY_VETERAN', 'ANCIENT_WISE_ONE', 'PARANOID', 'STONER', 'JOLLY_BEER_LOVER');
-+-- RAIDER and CASUAL stay 'default' (balanced mix)
 diff --git a/src/mod-ollama-chat_api.cpp b/src/mod-ollama-chat_api.cpp
 index 271077d..a4cc11f 100644
 --- a/src/mod-ollama-chat_api.cpp
@@ -553,507 +457,410 @@ index 3387db3..0fc098f 100644
 +
  
  #endif // MOD_OLLAMA_CHAT_EVENTS_H
-diff --git a/src/mod-ollama-chat_events_mail.cpp b/src/mod-ollama-chat_events_mail.cpp
+diff --git a/src/mod-ollama-chat_groupjoin.cpp b/src/mod-ollama-chat_groupjoin.cpp
 new file mode 100644
-index 0000000..0ec0bd0
+index 0000000..18dc56d
 --- /dev/null
-+++ b/src/mod-ollama-chat_events_mail.cpp
-@@ -0,0 +1,272 @@
-+// mod-ollama-chat_events_mail.cpp
-+//
-+// Event-driven mail from bots: after a REAL player finishes a quest while
-+// grouped with random bots, one of those bots may mail them a small reward
-+// (gold or a spare green+ item) with an in-character note. The per-bot chance
-+// is driven entirely by the bot's personality (reusing gearGiveChance), scaled
-+// down for this passive event. Self-contained: all state and helpers are local
-+// to this translation unit.
++++ b/src/mod-ollama-chat_groupjoin.cpp
+@@ -0,0 +1,342 @@
++#include "mod-ollama-chat_groupjoin.h"
 +
-+#include "ScriptMgr.h"
++#include "Common.h"
 +#include "Player.h"
-+#include "Item.h"
-+#include "Bag.h"
 +#include "Group.h"
-+#include "Mail.h"
-+#include "ObjectMgr.h"
-+#include "ObjectAccessor.h"
-+#include "QuestDef.h"
-+#include "ItemTemplate.h"
-+#include "SharedDefines.h"
-+#include "DatabaseEnv.h"
-+#include "Random.h"
++#include "WorldSession.h"
++#include "WorldPacket.h"
 +#include "Config.h"
 +#include "Log.h"
-+#include "Common.h"
++#include "Random.h"
 +#include "Timer.h"
++#include "DatabaseEnv.h"
++#include "ObjectGuid.h"
 +
-+#include "PlayerbotAI.h"
-+#include "PlayerbotMgr.h"
-+#include "RandomPlayerbotMgr.h"
-+
-+#include "mod-ollama-chat_config.h"
 +#include "mod-ollama-chat_personality.h"
++#include "mod-ollama-chat_sentiment.h"
 +
-+#include <fmt/core.h>
-+#include <mutex>
-+#include <map>
-+#include <utility>
-+#include <string>
 +#include <algorithm>
++#include <cctype>
++#include <map>
++#include <mutex>
++#include <string>
++#include <unordered_map>
++#include <utility>
 +
-+// Implemented in mod-ollama-chat_handler.cpp: makes the bot say a short
-+// in-character line about the given situation.
-+extern void OllamaChat_SpeakSituation(Player*, Player*, std::string const&, bool);
-+
++// ---------------------------------------------------------------------------
++// Small string helpers (local, header-free).
++// ---------------------------------------------------------------------------
 +namespace
 +{
++    std::string ToLower(std::string const& in)
++    {
++        std::string out = in;
++        for (char& c : out)
++            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
++        return out;
++    }
 +
-+// --------------------------------------------------------------------------
-+// Anti-spam cooldown: at most one event-mail per (bot, player) pair per hour.
-+// --------------------------------------------------------------------------
-+constexpr uint32 EVENT_MAIL_COOLDOWN_MIN = 60;
++    // True if `word` appears in `lowerMsg` bounded by non-alphanumeric characters
++    // (so "us" does not match "focus", and "u" does not match "group").
++    bool ContainsWholeWord(std::string const& lowerMsg, std::string const& word)
++    {
++        if (word.empty())
++            return false;
 +
-+std::mutex g_eventMailMutex;
-+std::map<std::pair<uint64_t, uint64_t>, uint32> g_lastEventMail;
-+
-+bool CanEventMailNow(Player* bot, Player* player)
-+{
-+    std::lock_guard<std::mutex> lock(g_eventMailMutex);
-+    uint32 now = getMSTime();
-+    auto it = g_lastEventMail.find({bot->GetGUID().GetRawValue(), player->GetGUID().GetRawValue()});
-+    if (it != g_lastEventMail.end() && now - it->second < EVENT_MAIL_COOLDOWN_MIN * MINUTE * IN_MILLISECONDS)
++        size_t pos = 0;
++        while ((pos = lowerMsg.find(word, pos)) != std::string::npos)
++        {
++            bool validStart = (pos == 0 || !std::isalnum(static_cast<unsigned char>(lowerMsg[pos - 1])));
++            size_t endPos = pos + word.size();
++            bool validEnd = (endPos >= lowerMsg.size() || !std::isalnum(static_cast<unsigned char>(lowerMsg[endPos])));
++            if (validStart && validEnd)
++                return true;
++            ++pos;
++        }
 +        return false;
++    }
++}
++
++// ---------------------------------------------------------------------------
++// LooksLikeGroupRequest - keyword heuristic. Two tiers:
++//   * "strong" phrases are unambiguous requests on their own;
++//   * "weak" keywords only count when paired with a first/second-person cue
++//     ('?' or the whole words "me"/"us"), so "the party was fun" is ignored.
++// Kept deliberately simple and listed here for easy tuning.
++// ---------------------------------------------------------------------------
++bool LooksLikeGroupRequest(std::string const& msg)
++{
++    std::string const m = ToLower(msg);
++
++    static char const* const kStrongPhrases[] = {
++        "inv me", "invite me", "join me", "carry me", "help me", "give me a hand",
++        "wanna group", "want to group", "can you help", "could you help",
++        "group up", "lets group", "let's group", "party up",
++        "lfg", "looking for group", "need a group", "need a healer", "need a tank"
++    };
++    for (char const* phrase : kStrongPhrases)
++        if (m.find(phrase) != std::string::npos)
++            return true;
++
++    static char const* const kWeakKeywords[] = { "invite", "party", "group", "help" };
++    bool hasWeak = false;
++    for (char const* kw : kWeakKeywords)
++    {
++        if (m.find(kw) != std::string::npos)
++        {
++            hasWeak = true;
++            break;
++        }
++    }
++    if (!hasWeak)
++        return false;
++
++    bool cue = (m.find('?') != std::string::npos) || ContainsWholeWord(m, "me") || ContainsWholeWord(m, "us");
++    return cue;
++}
++
++// ---------------------------------------------------------------------------
++// GroupJoinChanceFor - base chance from personality key, else playstyle, else
++// 40; plus a sentiment bonus when the bot already likes the player. Clamped
++// 5..95. Playstyle is resolved via the shared characters DB and cached per bot.
++// ---------------------------------------------------------------------------
++namespace
++{
++    // Resolve a bot's playstyle from its mod-ollama-chat personality via the
++    // personality-templates join, mirroring mod-playerbots' GetBotPlaystyle.
++    // Cached per guid; empty results retried every 5 min so late personality
++    // assignment still picks up a profile.
++    std::mutex g_playstyleCacheMutex;
++    std::unordered_map<ObjectGuid::LowType, std::pair<std::string, uint32>> g_playstyleCache;
++
++    std::string GetBotPlaystyle(Player* bot)
++    {
++        static int hasPlaystyleColumn = -1;
++        if (hasPlaystyleColumn == -1)
++        {
++            QueryResult probe = CharacterDatabase.Query(
++                "SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() "
++                "AND TABLE_NAME = 'mod_ollama_chat_personality_templates' AND COLUMN_NAME = 'playstyle'");
++            hasPlaystyleColumn = probe ? 1 : 0;
++        }
++        if (!hasPlaystyleColumn)
++            return "";
++
++        ObjectGuid::LowType guid = bot->GetGUID().GetCounter();
++        uint32 now = getMSTime();
++        {
++            std::lock_guard<std::mutex> lock(g_playstyleCacheMutex);
++            auto it = g_playstyleCache.find(guid);
++            if (it != g_playstyleCache.end() &&
++                (!it->second.first.empty() || getMSTimeDiff(it->second.second, now) < 5 * MINUTE * IN_MILLISECONDS))
++                return it->second.first;
++        }
++
++        std::string playstyle;
++        QueryResult result = CharacterDatabase.Query(
++            "SELECT t.playstyle FROM mod_ollama_chat_personality p "
++            "JOIN mod_ollama_chat_personality_templates t ON t.`key` = p.personality "
++            "WHERE p.guid = {}", guid);
++        if (result)
++            playstyle = (*result)[0].Get<std::string>();
++        if (playstyle == "default")
++            playstyle.clear();
++
++        std::lock_guard<std::mutex> lock(g_playstyleCacheMutex);
++        g_playstyleCache[guid] = { playstyle, now };
++        return playstyle;
++    }
++}
++
++float GroupJoinChanceFor(Player* bot, Player* player)
++{
++    if (!bot)
++        return 0.0f;
++
++    static std::unordered_map<std::string, float> const kByPersonality = {
++        { "LFG_SPAMMER",       95.0f }, { "GUILD_RECRUITER",   85.0f },
++        { "HEALER_MAIN",       75.0f }, { "WOW_MOM",           75.0f },
++        { "CHILL_DAD",         70.0f }, { "MENTOR",            75.0f },
++        { "HEROIC_LEADER",     70.0f }, { "EGIRL",             65.0f },
++        { "SCARED_NEWBIE",     55.0f }, { "ELITE_ARENA_PVPER",  5.0f },
++        { "PVP_TRASHTALKER",   10.0f }, { "SILENT_TYPE",       15.0f },
++        { "ONE_WORD_GRUNTER",  15.0f }, { "GRUMPY_VETERAN",    20.0f },
++        { "UNHINGED_TROLL",    25.0f }, { "MIN_MAXER",         20.0f },
++        { "HARDCORE_RAIDLEAD", 15.0f }
++    };
++    static std::unordered_map<std::string, float> const kByPlaystyle = {
++        { "socializer", 65.0f }, { "quester",  55.0f }, { "idler",    40.0f },
++        { "explorer",   40.0f }, { "grinder",  25.0f }, { "pvper",    20.0f }
++    };
++
++    float chance = 40.0f;
++
++    std::string const personality = GetBotPersonality(bot);
++    auto pit = kByPersonality.find(personality);
++    if (pit != kByPersonality.end())
++    {
++        chance = pit->second;
++    }
++    else
++    {
++        std::string const playstyle = GetBotPlaystyle(bot);
++        auto sit = kByPlaystyle.find(playstyle);
++        if (sit != kByPlaystyle.end())
++            chance = sit->second;
++    }
++
++    if (player)
++    {
++        float sentiment = GetBotPlayerSentiment(bot->GetGUID().GetRawValue(), player->GetGUID().GetRawValue());
++        if (sentiment >= 0.6f)
++            chance += sConfigMgr->GetOption<float>("OllamaChat.GroupJoinSentimentBonus", 20.0f);
++    }
++
++    return std::clamp(chance, 5.0f, 95.0f);
++}
++
++// ---------------------------------------------------------------------------
++// Pending "who, me?" state: (bot low guid, player low guid) -> timestamp(ms).
++// 60s TTL - after that the disambiguation is stale and forgotten.
++// ---------------------------------------------------------------------------
++namespace
++{
++    std::mutex g_whoMeMutex;
++    std::map<std::pair<ObjectGuid::LowType, ObjectGuid::LowType>, uint32> g_pendingWhoMe;
++    constexpr uint32 kWhoMeTtlMs = 60 * IN_MILLISECONDS;
++
++    std::pair<ObjectGuid::LowType, ObjectGuid::LowType> WhoMeKey(Player* bot, Player* player)
++    {
++        return { bot->GetGUID().GetCounter(), player->GetGUID().GetCounter() };
++    }
++}
++
++void RegisterWhoMe(Player* bot, Player* player)
++{
++    if (!bot || !player)
++        return;
++    std::lock_guard<std::mutex> lock(g_whoMeMutex);
++    g_pendingWhoMe[WhoMeKey(bot, player)] = getMSTime();
++}
++
++bool HasPendingWhoMe(Player* bot, Player* player)
++{
++    if (!bot || !player)
++        return false;
++    std::lock_guard<std::mutex> lock(g_whoMeMutex);
++    auto it = g_pendingWhoMe.find(WhoMeKey(bot, player));
++    if (it == g_pendingWhoMe.end())
++        return false;
++    if (getMSTimeDiff(it->second, getMSTime()) > kWhoMeTtlMs)
++    {
++        g_pendingWhoMe.erase(it);
++        return false;
++    }
 +    return true;
 +}
 +
-+void RegisterEventMail(Player* bot, Player* player)
++void ClearWhoMe(Player* bot, Player* player)
 +{
-+    std::lock_guard<std::mutex> lock(g_eventMailMutex);
-+    g_lastEventMail[{bot->GetGUID().GetRawValue(), player->GetGUID().GetRawValue()}] = getMSTime();
++    if (!bot || !player)
++        return;
++    std::lock_guard<std::mutex> lock(g_whoMeMutex);
++    g_pendingWhoMe.erase(WhoMeKey(bot, player));
 +}
 +
-+// --------------------------------------------------------------------------
-+// Reward helpers.
-+// --------------------------------------------------------------------------
-+
-+// Find a spare, non-soulbound, uncommon-or-better item in the bot's backpack
-+// or bags. Skips conjured items and anything the bot has equipped. Returns
-+// nullptr if the bot has nothing worth parting with.
-+Item* FindSpareItem(Player* bot)
-+{
-+    Item* best = nullptr;
-+    auto consider = [&](Item* item)
-+    {
-+        if (!item || item->IsSoulBound())
-+            return;
-+        ItemTemplate const* proto = item->GetTemplate();
-+        if (!proto || proto->Quality < ITEM_QUALITY_UNCOMMON || proto->Quality > ITEM_QUALITY_EPIC)
-+            return;
-+        if (proto->Bonding == BIND_QUEST_ITEM || proto->HasFlag(ITEM_FLAG_CONJURED))
-+            return;
-+        if (!best || proto->ItemLevel > best->GetTemplate()->ItemLevel)
-+            best = item;
-+    };
-+
-+    for (uint8 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
-+        consider(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i));
-+    for (uint8 b = INVENTORY_SLOT_BAG_START; b < INVENTORY_SLOT_BAG_END; ++b)
-+        if (Bag* bag = bot->GetBagByPos(b))
-+            for (uint32 s = 0; s < bag->GetBagSize(); ++s)
-+                consider(bag->GetItemByPos(s));
-+
-+    return best;
-+}
-+
-+// Mail a spare item from the bot to the player. Mirrors MailBagItemTo() in
-+// mod-ollama-chat_handler.cpp. Returns the item name on success, "" on failure.
-+std::string MailItemReward(Player* bot, Player* player, Item* item)
-+{
-+    if (!item)
-+        return "";
-+
-+    std::string itemName = item->GetTemplate()->Name1;
-+
-+    CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
-+
-+    item->SetNotRefundable(bot);
-+    bot->MoveItemFromInventory(item->GetBagSlot(), item->GetSlot(), true);
-+    item->DeleteFromInventoryDB(trans);
-+    if (item->GetState() == ITEM_UNCHANGED)
-+        item->FSetState(ITEM_CHANGED);
-+    item->SetOwnerGUID(player->GetGUID());
-+    item->SaveToDB(trans);
-+
-+    MailDraft draft("A token of thanks", fmt::format("Good adventuring with you out there. Keep this - you earned it. - {}", bot->GetName()));
-+    draft.AddItem(item);
-+    draft.SendMailTo(trans, MailReceiver(player, player->GetGUID().GetCounter()), MailSender(bot), MAIL_CHECK_MASK_COPIED);
-+
-+    bot->SaveInventoryAndGoldToDB(trans);
-+    CharacterDatabase.CommitTransaction(trans);
-+    return itemName;
-+}
-+
-+// Mail gold from the bot to the player (deducted from the bot's purse).
-+// Returns a short human description on success, "" on failure.
-+std::string MailGoldReward(Player* bot, Player* player, uint32 copper)
-+{
-+    if (copper == 0 || bot->GetMoney() < copper)
-+        return "";
-+
-+    CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
-+
-+    bot->ModifyMoney(-int32(copper));
-+    bot->SaveGoldToDB(trans);
-+
-+    MailDraft draft("A little something", fmt::format("Thanks for the help on that quest. Here's a bit of coin. - {}", bot->GetName()));
-+    draft.AddMoney(copper);
-+    draft.SendMailTo(trans, MailReceiver(player, player->GetGUID().GetCounter()), MailSender(bot), MAIL_CHECK_MASK_COPIED);
-+
-+    CharacterDatabase.CommitTransaction(trans);
-+    return fmt::format("{} silver", std::max<uint32>(copper / 100, 1));
-+}
-+
-+// Decide and deliver a reward. Prefers an item ~40% of the time when one is
-+// available, otherwise gold. Returns a short description of what was mailed,
-+// or "" if nothing could be delivered.
-+std::string DeliverReward(Player* bot, Player* player)
-+{
-+    Item* spare = FindSpareItem(bot);
-+
-+    // Modest gold scaled to level, capped so it stays "a little something".
-+    uint32 gold = std::min<uint32>(uint32(player->GetLevel()) * urand(50, 150), 50000);
-+    bool botCanPayGold = gold > 0 && bot->GetMoney() >= gold;
-+
-+    if (spare && (!botCanPayGold || roll_chance_i(40)))
-+    {
-+        std::string desc = MailItemReward(bot, player, spare);
-+        if (!desc.empty())
-+            return desc;
-+    }
-+
-+    if (botCanPayGold)
-+    {
-+        std::string desc = MailGoldReward(bot, player, gold);
-+        if (!desc.empty())
-+            return desc;
-+    }
-+
-+    // Last-ditch fallback: if gold failed but an item exists, send the item.
-+    if (spare)
-+        return MailItemReward(bot, player, spare);
-+
-+    return "";
-+}
-+
-+} // namespace
-+
-+// --------------------------------------------------------------------------
-+// PlayerScript: reward hook on quest completion.
-+// --------------------------------------------------------------------------
-+class OllamaChatCompletionMailScript : public PlayerScript
-+{
-+public:
-+    OllamaChatCompletionMailScript() : PlayerScript("OllamaChatCompletionMailScript") { }
-+
-+    void OnPlayerCompleteQuest(Player* player, Quest const* quest) override
-+    {
-+        if (!g_Enable || !player || !quest)
-+            return;
-+
-+        if (!sConfigMgr->GetOption<bool>("OllamaChat.EnableEventMail", true))
-+            return;
-+
-+        float mailMultiplier = sConfigMgr->GetOption<float>("OllamaChat.EventMailChanceMultiplier", 0.5f);
-+        if (mailMultiplier <= 0.0f)
-+            return;
-+
-+        // Only REAL players get rewarded - never bots.
-+        if (PlayerbotsMgr::instance().GetPlayerbotAI(player))
-+            return;
-+
-+        Group* group = player->GetGroup();
-+        if (!group)
-+            return;
-+
-+        for (auto const& slot : group->GetMemberSlots())
-+        {
-+            if (slot.guid == player->GetGUID())
-+                continue;
-+
-+            Player* bot = ObjectAccessor::FindPlayer(slot.guid);
-+            if (!bot)
-+                continue;
-+
-+            // Must be a random bot (not a human, not a hand-summoned alt-bot).
-+            if (!PlayerbotsMgr::instance().GetPlayerbotAI(bot))
-+                continue;
-+            if (!sRandomPlayerbotMgr.IsRandomBot(bot))
-+                continue;
-+
-+            // Shared accomplishment: same map and zone as the questing player.
-+            if (bot->GetMapId() != player->GetMapId() || bot->GetZoneId() != player->GetZoneId())
-+                continue;
-+
-+            if (!CanEventMailNow(bot, player))
-+                continue;
-+
-+            // Personality-driven chance, scaled down for this passive event.
-+            std::string personality = GetBotPersonality(bot);
-+            float baseChance = 2.0f;
-+            auto it = g_PersonalityTemplates.find(personality);
-+            if (it != g_PersonalityTemplates.end())
-+                baseChance = it->second.gearGiveChance;
-+
-+            float effectiveChance = baseChance * mailMultiplier;
-+            if (effectiveChance <= 0.0f || !roll_chance_f(effectiveChance))
-+                continue;
-+
-+            // Roll succeeded - try to actually deliver a reward.
-+            std::string rewardDesc = DeliverReward(bot, player);
-+            if (rewardDesc.empty())
-+                continue; // nothing to give; let another member get a chance
-+
-+            RegisterEventMail(bot, player);
-+
-+            LOG_INFO("server.loading", "[Ollama Chat] [EventMail] {} mailed {} a reward ({}) for finishing {}",
-+                     bot->GetName(), player->GetName(), rewardDesc, quest->GetTitle());
-+
-+            OllamaChat_SpeakSituation(bot, player,
-+                "you just finished a quest together and mailed them a thank-you reward", false);
-+
-+            break; // only one bot rewards per event
-+        }
-+    }
-+};
-+
-+// Registration entry point. Call this from Addmod_ollama_chatScripts() in
-+// mod-ollama-chat_main.cpp (see registration note reported to the user).
-+void AddSC_mod_ollama_chat_events_mail()
-+{
-+    new OllamaChatCompletionMailScript();
-+}
-diff --git a/src/mod-ollama-chat_guildnames.cpp b/src/mod-ollama-chat_guildnames.cpp
-new file mode 100644
-index 0000000..bf2332a
---- /dev/null
-+++ b/src/mod-ollama-chat_guildnames.cpp
-@@ -0,0 +1,215 @@
-+// mod-ollama-chat_guildnames.cpp
-+//
-+// LLM-generated guild names. When mod-playerbots forms a personality-themed
-+// bot guild it starts with a static themed name; right after formation it calls
-+// OllamaChat_RenameGuildInVoice (via a weak symbol) so the bot LEADER's
-+// personality can invent a better, in-voice name through the local LLM. The
-+// generation is fully async and never blocks guild formation.
-+//
-+// Thread-safety: the LLM query and string sanitizing run on a detached worker
-+// thread, which only reads (SubmitQuery, name lookups) and enqueues a result.
-+// The actual guild rename touches core guild state, so it is deferred to the
-+// world thread: the worker pushes a pending entry, and OllamaChatGuildNameWorldScript::
-+// OnUpdate drains the queue and applies renames on the world thread.
-+
-+#include "mod-ollama-chat_api.h"
-+#include "mod-ollama-chat_config.h"
-+#include "mod-ollama-chat_personality.h"
-+
-+#include "Config.h"
-+#include "Guild.h"
-+#include "GuildMgr.h"
-+#include "Log.h"
-+#include "ObjectMgr.h"
-+#include "Player.h"
-+#include "ScriptMgr.h"
-+
-+#include "PlayerbotAI.h"
-+#include "PlayerbotMgr.h"
-+
-+#include <fmt/core.h>
-+#include <algorithm>
-+#include <cctype>
-+#include <mutex>
-+#include <string>
-+#include <thread>
-+#include <vector>
-+
++// ---------------------------------------------------------------------------
++// Invite packet - mirrors mod-playerbots InviteToGroupAction::Invite: build a
++// CMSG_GROUP_INVITE payload (target name + roles mask) and feed it straight to
++// the bot's session handler, exactly as the client would.
++// ---------------------------------------------------------------------------
 +namespace
 +{
-+    struct PendingGuildRename
++    void SendGroupInvite(Player* bot, Player* player)
 +    {
-+        uint32 guildId;
-+        std::string name;
-+        std::string leaderName;
-+    };
-+
-+    // Worker thread pushes here; the world-thread WorldScript below drains it.
-+    std::mutex g_GuildNameQueueMutex;
-+    std::vector<PendingGuildRename> g_GuildNameQueue;
-+
-+    // Turn a raw model response into a clean, single-line guild name: keep only
-+    // the first line, strip surrounding whitespace/quotes/punctuation, collapse
-+    // internal whitespace runs, and hard-cap at the WoW client's 24-char limit.
-+    // Title-casing is intentionally not applied.
-+    std::string SanitizeGuildName(std::string s)
-+    {
-+        // Some models prefix ("Sure! ") or append an explanation on a new line;
-+        // keep only the first line.
-+        if (size_t nl = s.find_first_of("\r\n"); nl != std::string::npos)
-+            s = s.substr(0, nl);
-+
-+        auto isEdgeJunk = [](unsigned char c) -> bool
-+        {
-+            return std::isspace(c) || c == '"' || c == '\'' || c == '.' || c == ',' || c == '!' ||
-+                   c == '?' || c == ':' || c == ';' || c == '`' || c == '*' || c == '(' || c == ')' ||
-+                   c == '[' || c == ']' || c == '-' || c == '_';
-+        };
-+
-+        size_t begin = 0;
-+        size_t end = s.size();
-+        while (begin < end && isEdgeJunk(static_cast<unsigned char>(s[begin])))
-+            ++begin;
-+        while (end > begin && isEdgeJunk(static_cast<unsigned char>(s[end - 1])))
-+            --end;
-+        s = s.substr(begin, end - begin);
-+
-+        // Collapse internal whitespace runs to a single space.
-+        std::string out;
-+        out.reserve(s.size());
-+        bool prevSpace = false;
-+        for (char ch : s)
-+        {
-+            if (std::isspace(static_cast<unsigned char>(ch)))
-+            {
-+                if (!prevSpace && !out.empty())
-+                    out.push_back(' ');
-+                prevSpace = true;
-+            }
-+            else
-+            {
-+                out.push_back(ch);
-+                prevSpace = false;
-+            }
-+        }
-+
-+        // WoW client guild-name limit is 24 characters; do not leave a dangling
-+        // space after a hard cut.
-+        if (out.size() > 24)
-+        {
-+            out.resize(24);
-+            while (!out.empty() && std::isspace(static_cast<unsigned char>(out.back())))
-+                out.pop_back();
-+        }
-+
-+        return out;
++        if (!bot || !player || !bot->GetSession())
++            return;
++        WorldPacket p;
++        uint32 roles_mask = 0;
++        p << player->GetName();
++        p << roles_mask;
++        bot->GetSession()->HandleGroupInviteOpcode(p);
 +    }
-+}  // namespace
 +
-+// ---------------------------------------------------------------------------
-+// Weak-symbol entry point called from mod-playerbots (same binary) right after
-+// a personality guild is formed. Fire-and-forget: async, never blocks the
-+// caller. Non-static so the weak extern in PersonalityGuildFactory.cpp binds.
-+// ---------------------------------------------------------------------------
-+void OllamaChat_RenameGuildInVoice(Player* leader, uint32 guildId, std::string const& archetype)
-+{
-+    if (!g_Enable || !leader || !guildId)
-+        return;
-+
-+    if (!sConfigMgr->GetOption<bool>("OllamaChat.EnableGuildNameGen", true))
-+        return;
-+
-+    PlayerbotAI* botAI = PlayerbotsMgr::instance().GetPlayerbotAI(leader);
-+    if (!botAI)
-+        return;
-+
-+    std::string personality       = GetBotPersonality(leader);
-+    std::string personalityPrompt = GetPersonalityPromptAddition(personality);
-+    std::string botClass =
-+        botAI->GetChatHelper() ? botAI->GetChatHelper()->FormatClass(leader->getClass()) : "adventurer";
-+    std::string leaderName        = leader->GetName();
-+
-+    std::string prompt = fmt::format(
-+        "You're a Wrath-era WoW player. Name: {}, a level {} {}. "
-+        "MAKE SURE YOU RESPOND USING YOUR PERSONALITY, WHICH IS: {}: {}. "
-+        "You just founded a {} guild. Invent its name: a memorable 2008-era WoW guild name, "
-+        "2 to 4 words, plain text, no quotes, nothing else.",
-+        leaderName, leader->GetLevel(), botClass, personality, personalityPrompt, archetype);
-+
-+    // Nudge temperature up a touch so guild names come out more varied/creative
-+    // than ordinary chat lines.
-+    OllamaQueryOptions opts = GetPersonalityQueryOptions(leader);
-+    float baseTemp = (opts.temperatureOverride >= 0.0f) ? opts.temperatureOverride : g_OllamaTemperature;
-+    opts.temperatureOverride = std::min(baseTemp + 0.15f, 1.5f);
-+
-+    std::thread([guildId, prompt, opts, leaderName]()
++    bool MessageNamesBot(Player* bot, std::string const& lowerMsg)
 +    {
-+        try
-+        {
-+            std::future<std::string> fut = SubmitQuery(prompt, opts);
-+            if (!fut.valid())
-+                return;
++        std::string const name = ToLower(bot->GetName());
++        return !name.empty() && lowerMsg.find(name) != std::string::npos;
++    }
 +
-+            std::string name = SanitizeGuildName(fut.get());
-+            if (name.size() < 3)  // empty or too short to be a real guild name
-+                return;
-+            if (sObjectMgr->IsReservedName(name) || sObjectMgr->IsProfanityName(name))
-+                return;
-+            if (sGuildMgr->GetGuildByName(name))  // taken already: keep the themed name
-+                return;
-+
-+            std::lock_guard<std::mutex> lock(g_GuildNameQueueMutex);
-+            g_GuildNameQueue.push_back(PendingGuildRename{guildId, std::move(name), leaderName});
-+        }
-+        catch (...)
-+        {
-+        }
-+    }).detach();
++    bool MessageHasAffirmative(std::string const& lowerMsg)
++    {
++        static char const* const kAffirmatives[] = { "you", "yes", "yeah", "yep", "u" };
++        for (char const* word : kAffirmatives)
++            if (ContainsWholeWord(lowerMsg, word))
++                return true;
++        return false;
++    }
 +}
 +
 +// ---------------------------------------------------------------------------
-+// Drains pending renames on the world thread and applies them via the same
-+// sequence the ".guild rename" command uses (uniqueness check + Guild::SetName,
-+// which validates the name and persists it to the characters DB).
++// EvaluateGroupRequest - see header. World-thread only.
 +// ---------------------------------------------------------------------------
-+class OllamaChatGuildNameWorldScript : public WorldScript
++GroupJoinOutcome EvaluateGroupRequest(Player* bot, Player* player, std::string const& msg,
++                                      uint32_t candidateBotsInRange, std::string& outExtraContext)
 +{
-+public:
-+    OllamaChatGuildNameWorldScript() : WorldScript("OllamaChatGuildNameWorldScript") { }
++    outExtraContext.clear();
 +
-+    void OnUpdate(uint32 /*diff*/) override
++    if (!sConfigMgr->GetOption<bool>("OllamaChat.EnableGroupJoin", true))
++        return GroupJoinOutcome::NotAGroupRequest;
++
++    if (!bot || !player)
++        return GroupJoinOutcome::NotAGroupRequest;
++
++    std::string const lowerMsg = ToLower(msg);
++
++    // A fresh request needs group-request phrasing; a bare confirmation
++    // ("yes, you") only counts as a continuation if we recently asked who-me.
++    bool const affirmedPending = HasPendingWhoMe(bot, player) && MessageHasAffirmative(lowerMsg);
++    if (!LooksLikeGroupRequest(msg) && !affirmedPending)
++        return GroupJoinOutcome::NotAGroupRequest;
++
++    // Already grouped together -> nothing to do, treat as normal chat.
++    Group* botGroup = bot->GetGroup();
++    if (botGroup && botGroup->IsMember(player->GetGUID()))
++        return GroupJoinOutcome::NotAGroupRequest;
++
++    // Bot's group is full (and the player isn't in it) -> can't invite.
++    if (botGroup && botGroup->IsFull())
 +    {
-+        std::vector<PendingGuildRename> pending;
-+        {
-+            std::lock_guard<std::mutex> lock(g_GuildNameQueueMutex);
-+            if (g_GuildNameQueue.empty())
-+                return;
-+            pending.swap(g_GuildNameQueue);
-+        }
-+
-+        for (PendingGuildRename const& entry : pending)
-+        {
-+            Guild* guild = sGuildMgr->GetGuildById(entry.guildId);
-+            if (!guild)
-+                continue;
-+
-+            // Re-check uniqueness on the world thread: another guild could have
-+            // taken the name between the worker's check and now.
-+            if (sGuildMgr->GetGuildByName(entry.name))
-+                continue;
-+
-+            if (!guild->SetName(entry.name))
-+                continue;
-+
-+            LOG_INFO("server.loading", "[Ollama Chat] [GuildName] renamed guild {} -> '{}' (leader {})",
-+                     entry.guildId, entry.name, entry.leaderName);
-+        }
++        outExtraContext = "(They asked to group but you're already grouped up - let them down briefly.)";
++        return GroupJoinOutcome::Declined;
 +    }
++
++    bool const named = MessageNamesBot(bot, lowerMsg);
++    bool const resolved = named || candidateBotsInRange <= 1 || affirmedPending;
++
++    if (resolved)
++    {
++        ClearWhoMe(bot, player);
++        float const chance = GroupJoinChanceFor(bot, player);
++        if (roll_chance_f(chance))
++        {
++            SendGroupInvite(bot, player);
++            LOG_INFO("server.loading", "[GroupJoin] {} invited {} (chance {})",
++                     bot->GetName(), player->GetName(), chance);
++            outExtraContext = "(You just sent them a group invite - tell them it's on the way.)";
++            return GroupJoinOutcome::Invited;
++        }
++
++        LOG_INFO("server.loading", "[GroupJoin] {} declined {}", bot->GetName(), player->GetName());
++        outExtraContext = "(They asked you to group up but you don't feel like it - decline in your own words, "
++                          "true to your personality.)";
++        return GroupJoinOutcome::Declined;
++    }
++
++    // Ambiguous: several bots could be the addressee. Ask, and remember we asked.
++    RegisterWhoMe(bot, player);
++    LOG_INFO("server.loading", "[GroupJoin] {} asks who-me to {}", bot->GetName(), player->GetName());
++    outExtraContext = "(There are several of you nearby and you're not sure " + std::string(player->GetName()) +
++                      " meant you - ask briefly, in your own way, whether they mean you.)";
++    return GroupJoinOutcome::AskWhoMe;
++}
+diff --git a/src/mod-ollama-chat_groupjoin.h b/src/mod-ollama-chat_groupjoin.h
+new file mode 100644
+index 0000000..65a0196
+--- /dev/null
++++ b/src/mod-ollama-chat_groupjoin.h
+@@ -0,0 +1,48 @@
++#ifndef MOD_OLLAMA_CHAT_GROUPJOIN_H
++#define MOD_OLLAMA_CHAT_GROUPJOIN_H
++
++#include <string>
++#include <cstdint>
++
++class Player;
++
++// ---------------------------------------------------------------------------
++// Group-join-on-request + addressee disambiguation.
++//
++// When a real player nearby asks to be invited/grouped/helped, a bot may send
++// a REAL group invite (gated by personality/playstyle/sentiment). When it is
++// ambiguous which of several nearby bots was addressed, bots ask "who, me?" in
++// their own voice, at staggered times, instead of all inviting at once.
++// ---------------------------------------------------------------------------
++
++// Result of evaluating a possible "invite me / group up" request.
++enum class GroupJoinOutcome
++{
++    NotAGroupRequest,   // not a group request - fall through to the normal chat flow
++    AskWhoMe,           // ambiguous addressee - bot asks whether the player meant it
++    Invited,            // bot sent the player a real group invite
++    Declined            // bot refused to group up
 +};
 +
-+// Registration entry point. Call this from Addmod_ollama_chatScripts() in
-+// mod-ollama-chat_main.cpp (see the registration note reported to the user).
-+void AddSC_mod_ollama_chat_guildnames()
-+{
-+    new OllamaChatGuildNameWorldScript();
-+}
++// True if the message reads like a request to be invited / grouped / helped.
++// Simple, tunable keyword list (see the .cpp for the exact patterns).
++bool LooksLikeGroupRequest(std::string const& msg);
++
++// Personality/playstyle/sentiment-weighted chance (clamped 5..95) that this
++// bot agrees to group up with the given player.
++float GroupJoinChanceFor(Player* bot, Player* player);
++
++// Pending "who, me?" disambiguation bookkeeping (60s TTL).
++void RegisterWhoMe(Player* bot, Player* player);
++bool HasPendingWhoMe(Player* bot, Player* player);
++void ClearWhoMe(Player* bot, Player* player);
++
++// Decision routine, called by the chat handler for each candidate bot BEFORE
++// the normal prompt is built. Runs on the world thread. On Invited it sends the
++// real group-invite packet immediately. `outExtraContext` receives a short
++// directive to append to the bot's prompt (empty for NotAGroupRequest).
++// `candidateBotsInRange` is how many bots are about to reply (1 == unambiguous).
++GroupJoinOutcome EvaluateGroupRequest(Player* bot, Player* player, std::string const& msg,
++                                      uint32_t candidateBotsInRange, std::string& outExtraContext);
++
++#endif // MOD_OLLAMA_CHAT_GROUPJOIN_H
 diff --git a/src/mod-ollama-chat_handler.cpp b/src/mod-ollama-chat_handler.cpp
-index cc89b9f..a2aa5df 100644
+index cc89b9f..4c94c8e 100644
 --- a/src/mod-ollama-chat_handler.cpp
 +++ b/src/mod-ollama-chat_handler.cpp
 @@ -12,9 +12,15 @@
@@ -1072,15 +879,27 @@ index cc89b9f..a2aa5df 100644
  #include <fmt/core.h>
  #include <nlohmann/json.hpp>
  #include <thread>
-@@ -30,6 +36,7 @@
+@@ -30,7 +36,9 @@
  #include "mod-ollama-chat_config.h"
  #include "mod-ollama-chat-utilities.h"
  #include "mod-ollama-chat_sentiment.h"
 +#include "mod-ollama-chat_memory.h"
  #include "mod-ollama-chat_rag.h"
++#include "mod-ollama-chat_groupjoin.h"
  #include <iomanip>
  #include "SpellMgr.h"
-@@ -286,8 +293,10 @@ void SaveBotConversationHistoryToDB()
+ #include "SpellInfo.h"
+@@ -52,7 +60,8 @@
+ // Forward declarations for internal helper functions.
+ static bool IsBotEligibleForChatChannelLocal(Player* bot, Player* player,
+                                              ChatChannelSourceLocal source, Channel* channel = nullptr, Player* receiver = nullptr);
+-static std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* player);
++static std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* player,
++                                     std::string const& extraContext = "", bool suppressGearContext = false);
+ 
+ // Helper function to format class name for any player
+ static std::string FormatPlayerClass(uint8_t classId)
+@@ -286,8 +295,10 @@ void SaveBotConversationHistoryToDB()
      }
  
      // Cleanup: keep only the N most recent entries per bot/player pair
@@ -1092,7 +911,7 @@ index cc89b9f..a2aa5df 100644
              SELECT
                  bot_guid,
                  player_guid,
-@@ -297,13 +306,11 @@ void SaveBotConversationHistoryToDB()
+@@ -297,13 +308,11 @@ void SaveBotConversationHistoryToDB()
                      ORDER BY timestamp DESC
                  ) as rn
              FROM mod_ollama_chat_history
@@ -1111,7 +930,7 @@ index cc89b9f..a2aa5df 100644
      )SQL";
      CharacterDatabase.Execute(SafeFormat(cleanupQuery, g_MaxConversationHistory));
  }
-@@ -1336,18 +1343,20 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
+@@ -1336,18 +1345,20 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
                      }
                      continue;
                  }
@@ -1135,15 +954,30 @@ index cc89b9f..a2aa5df 100644
                  }
              }
          }
-@@ -1410,11 +1419,12 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
+@@ -1408,13 +1419,26 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
+         if (bot == nullptr) {
+             continue;
          }
-         std::string prompt = GenerateBotPrompt(bot, msg, player);
+-        std::string prompt = GenerateBotPrompt(bot, msg, player);
++
++        // Group-join-on-request + addressee disambiguation. Runs here on the
++        // world thread (safe for the invite packet, like GenerateGearContext's
++        // inventory ops below). Only real players get invited. On AskWhoMe the
++        // gear/give context is suppressed so the bot just asks "who, me?".
++        std::string groupJoinContext;
++        GroupJoinOutcome groupJoinOutcome = GroupJoinOutcome::NotAGroupRequest;
++        if (!senderIsBot)
++            groupJoinOutcome = EvaluateGroupRequest(bot, player, msg,
++                                                    static_cast<uint32_t>(finalCandidates.size()), groupJoinContext);
++        bool isWhoMe = (groupJoinOutcome == GroupJoinOutcome::AskWhoMe);
++
++        std::string prompt = GenerateBotPrompt(bot, msg, player, groupJoinContext, isWhoMe);
          uint64_t botGuid = bot->GetGUID().GetRawValue();
 -        
 -        std::thread([botGuid, senderGuid, prompt, sourceLocal, channelId = (channel ? channel->GetChannelId() : 0), channelName = (channel ? channel->GetName() : ""), msg]() {
 +        OllamaQueryOptions queryOpts = GetPersonalityQueryOptions(bot);
 +
-+        std::thread([botGuid, senderGuid, prompt, queryOpts, sourceLocal, channelId = (channel ? channel->GetChannelId() : 0), channelName = (channel ? channel->GetName() : ""), msg]() {
++        std::thread([botGuid, senderGuid, prompt, queryOpts, isWhoMe, sourceLocal, channelId = (channel ? channel->GetChannelId() : 0), channelName = (channel ? channel->GetName() : ""), msg]() {
              try {
                  // Use the QueryManager to submit the query.
 -                auto responseFuture = SubmitQuery(prompt);
@@ -1151,10 +985,35 @@ index cc89b9f..a2aa5df 100644
                  if (!responseFuture.valid())
                  {
                      return;
-@@ -1797,8 +1807,285 @@ static bool IsBotEligibleForChatChannelLocal(Player* bot, Player* player, ChatCh
+@@ -1475,7 +1499,21 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
+                     senderPtr = ObjectAccessor::FindPlayer(ObjectGuid(senderGuid));
+                     if (!senderPtr) return;
+                 }
+-                
++
++                // Stagger "who, me?" replies so several nearby bots don't answer
++                // in unison. This sleep is in the worker thread (the Say below
++                // also happens here), so it only delays this bot's own reply.
++                if (isWhoMe)
++                {
++                    std::this_thread::sleep_for(std::chrono::milliseconds(urand(800, 5000)));
++                    botPtr = ObjectAccessor::FindPlayer(ObjectGuid(botGuid));
++                    if (!botPtr) return;
++                    botAI = PlayerbotsMgr::instance().GetPlayerbotAI(botPtr);
++                    if (!botAI) return;
++                    senderPtr = ObjectAccessor::FindPlayer(ObjectGuid(senderGuid));
++                    if (!senderPtr) return;
++                }
++
+                 // Route the response.
+                 if (channelId != 0 && !channelName.empty())
+                 {
+@@ -1797,8 +1835,286 @@ static bool IsBotEligibleForChatChannelLocal(Player* bot, Player* player, ChatCh
      }
  }
  
+-std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* player)
+-{  
 +// WotLK-era stat shorthand the bots use when talking gear
 +static char const* ClassPrimaryStat(uint8 playerClass)
 +{
@@ -1432,13 +1291,13 @@ index cc89b9f..a2aa5df 100644
 +    return ctx;
 +}
 +
- std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* player)
--{  
++std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* player,
++                              std::string const& extraContext, bool suppressGearContext)
 +{
      if (!bot || !player) {
          return "";
      }
-@@ -1853,6 +2140,7 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
+@@ -1853,6 +2169,7 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
  
      std::string chatHistory         = GetBotHistoryPrompt(botGuid, playerGuid, playerMessage);
      std::string sentimentInfo       = GetSentimentPromptAddition(bot, player);
@@ -1446,18 +1305,33 @@ index cc89b9f..a2aa5df 100644
  
      // Retrieve RAG information if enabled
      std::string ragInfo;
-@@ -1906,7 +2194,9 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
+@@ -1906,7 +2223,9 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
          fmt::arg("player_message", playerMessage),
          fmt::arg("extra_info", extraInfo),
          fmt::arg("chat_history", chatHistory),
 -        fmt::arg("sentiment_info", sentimentInfo)
 +        fmt::arg("sentiment_info", sentimentInfo),
 +        fmt::arg("memory_info", memoryInfo),
-+        fmt::arg("gear_context", GenerateGearContext(bot, player))
++        fmt::arg("gear_context", suppressGearContext ? std::string() : GenerateGearContext(bot, player))
      );
  
      // Add RAG information to the prompt if available
-@@ -1926,3 +2216,58 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
+@@ -1919,6 +2238,14 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
+         prompt += GenerateBotGameStateSnapshot(bot);
+     }
+ 
++    // Group-join / who-me directive (already fully built - appended raw, not
++    // run through the template formatter). Kept last so it is the final
++    // instruction the model reads.
++    if (!extraContext.empty())
++    {
++        prompt += "\n" + extraContext + "\n";
++    }
++
+     // Debug logging for full prompt including RAG information
+     if (g_DebugEnabled && g_DebugShowFullPrompt) {
+         LOG_INFO("server.loading", "[Ollama Chat] Full prompt sent to bot {} for player {}: {}", botName, playerName, prompt);
+@@ -1926,3 +2253,58 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
  
      return prompt;
  }
@@ -1557,314 +1431,6 @@ index 9c1a141..13b504e 100644
 +    void AddSC_mod_ollama_chat_guildnames();
 +    AddSC_mod_ollama_chat_guildnames();
  }
-diff --git a/src/mod-ollama-chat_memory.cpp b/src/mod-ollama-chat_memory.cpp
-new file mode 100644
-index 0000000..573b0da
---- /dev/null
-+++ b/src/mod-ollama-chat_memory.cpp
-@@ -0,0 +1,244 @@
-+// mod-ollama-chat_memory.cpp
-+//
-+// Bot event-memory subsystem: a random bot keeps a small, bounded set of
-+// structured memories about a REAL, currently-guilded player and references
-+// them in chat via {memory_info}. See mod-ollama-chat_memory.h for the design
-+// rationale. NO record-time LLM calls happen here -- memories are plain
-+// structured rows; the recall text is assembled cheaply from those rows.
-+
-+#include "mod-ollama-chat_memory.h"
-+#include "mod-ollama-chat_config.h"
-+#include "mod-ollama-chat-utilities.h"
-+
-+#include "ScriptMgr.h"
-+#include "Player.h"
-+#include "Guild.h"
-+#include "Battleground.h"
-+#include "SharedDefines.h"
-+#include "DatabaseEnv.h"
-+#include "Log.h"
-+
-+#include "PlayerbotAI.h"
-+#include "PlayerbotMgr.h"
-+#include "RandomPlayerbotMgr.h"
-+
-+#include <fmt/core.h>
-+#include <array>
-+#include <vector>
-+#include <string>
-+
-+// Resolve a human-readable zone name from a bot's current position. The bot is
-+// always a random bot here, so its PlayerbotAI is available.
-+static std::string ResolveBotZoneName(Player* bot)
-+{
-+    if (PlayerbotAI* ai = PlayerbotsMgr::instance().GetPlayerbotAI(bot))
-+    {
-+        if (AreaTableEntry const* zone = ai->GetCurrentZone())
-+            return PlayerbotAI::GetLocalizedAreaName(zone);
-+    }
-+    return "";
-+}
-+
-+void RecordMemory(Player* bot, Player* player, std::string const& eventType, std::string const& detail)
-+{
-+    if (!g_Enable || !g_EnableEventMemory || !bot || !player || bot == player)
-+        return;
-+
-+    // Guilded-players-only: this is the storage boundary. We never keep memories
-+    // about players who are not in a guild.
-+    if (player->GetGuildId() == 0)
-+        return;
-+
-+    // The rememberer must be a random bot; the remembered side must be a real
-+    // player. Bots do not keep memories about other bots.
-+    if (!PlayerbotsMgr::instance().GetPlayerbotAI(bot) || !sRandomPlayerbotMgr.IsRandomBot(bot))
-+        return;
-+    if (PlayerbotsMgr::instance().GetPlayerbotAI(player))
-+        return;
-+
-+    uint64_t botGuid    = bot->GetGUID().GetRawValue();
-+    uint64_t playerGuid = player->GetGUID().GetRawValue();
-+
-+    // Escape the free-text fields before they touch the query string.
-+    std::string safeType   = eventType;
-+    std::string safeDetail = detail;
-+    std::string safeZone   = ResolveBotZoneName(bot);
-+    CharacterDatabase.EscapeString(safeType);
-+    CharacterDatabase.EscapeString(safeDetail);
-+    CharacterDatabase.EscapeString(safeZone);
-+
-+    CharacterDatabase.Execute(SafeFormat(
-+        "INSERT INTO mod_ollama_chat_event_memories (bot_guid, player_guid, event_type, detail, zone) "
-+        "VALUES ({}, {}, '{}', '{}', '{}')",
-+        botGuid, playerGuid, safeType, safeDetail, safeZone));
-+
-+    // Bounded: keep only the newest g_EventMemoryMaxPerPair rows for this pair,
-+    // pruning oldest-first. id is AUTO_INCREMENT so it orders by insert time.
-+    if (g_EventMemoryMaxPerPair > 0)
-+    {
-+        CharacterDatabase.Execute(SafeFormat(
-+            "DELETE FROM mod_ollama_chat_event_memories "
-+            "WHERE bot_guid = {} AND player_guid = {} AND id NOT IN "
-+            "(SELECT id FROM (SELECT id FROM mod_ollama_chat_event_memories "
-+            "WHERE bot_guid = {} AND player_guid = {} ORDER BY id DESC LIMIT {}) AS keep)",
-+            botGuid, playerGuid, botGuid, playerGuid, g_EventMemoryMaxPerPair));
-+    }
-+
-+    if (g_DebugEnabled)
-+    {
-+        LOG_INFO("server.loading", "[OllamaChat] Recorded memory: bot {} remembers {} - {} ({}) in {}",
-+                 bot->GetName(), player->GetName(), eventType, detail, safeZone);
-+    }
-+}
-+
-+void RecordMemoryForPair(Player* a, Player* b, std::string const& eventType, std::string const& detail)
-+{
-+    if (!g_EnableEventMemory || !a || !b || a == b)
-+        return;
-+
-+    bool aIsBot = PlayerbotsMgr::instance().GetPlayerbotAI(a) != nullptr;
-+    bool bIsBot = PlayerbotsMgr::instance().GetPlayerbotAI(b) != nullptr;
-+
-+    // Exactly one side must be a bot (the rememberer); the other is the real
-+    // player it remembers. RecordMemory re-validates random-bot + guilded.
-+    if (aIsBot && !bIsBot)
-+        RecordMemory(a, b, eventType, detail);
-+    else if (bIsBot && !aIsBot)
-+        RecordMemory(b, a, eventType, detail);
-+}
-+
-+std::string BuildMemoryInfo(Player* bot, Player* player)
-+{
-+    if (!g_Enable || !g_EnableEventMemory || !bot || !player)
-+        return "";
-+
-+    uint64_t botGuid    = bot->GetGUID().GetRawValue();
-+    uint64_t playerGuid = player->GetGUID().GetRawValue();
-+
-+    // Keep the recall short: at most 4 most-recent memories so the prompt stays
-+    // compact.
-+    QueryResult result = CharacterDatabase.Query(SafeFormat(
-+        "SELECT detail, zone FROM mod_ollama_chat_event_memories "
-+        "WHERE bot_guid = {} AND player_guid = {} ORDER BY id DESC LIMIT 4",
-+        botGuid, playerGuid));
-+
-+    if (!result)
-+        return "";
-+
-+    std::vector<std::string> parts;
-+    do
-+    {
-+        Field* fields   = result->Fetch();
-+        std::string det = fields[0].Get<std::string>();
-+        std::string zn  = fields[1].Get<std::string>();
-+        if (det.empty())
-+            continue;
-+        if (!zn.empty())
-+            parts.push_back(SafeFormat("{} in {}", det, zn));
-+        else
-+            parts.push_back(det);
-+    } while (result->NextRow());
-+
-+    if (parts.empty())
-+        return "";
-+
-+    std::string joined;
-+    for (size_t i = 0; i < parts.size(); ++i)
-+    {
-+        joined += parts[i];
-+        if (i + 1 < parts.size())
-+            joined += "; ";
-+    }
-+
-+    return SafeFormat(
-+        "You recently: {}. Reference this shared history with {} naturally if it fits.",
-+        joined, player->GetName());
-+}
-+
-+void PurgePlayerMemories(uint64_t playerGuid)
-+{
-+    CharacterDatabase.Execute(SafeFormat(
-+        "DELETE FROM mod_ollama_chat_event_memories WHERE player_guid = {}", playerGuid));
-+}
-+
-+// --------------------------------------------------------------------------
-+// GuildScript: when a player leaves (or is removed from) a guild, purge every
-+// memory about them. This is what keeps storage bounded to guilded players.
-+// --------------------------------------------------------------------------
-+class OllamaChatMemoryGuildScript : public GuildScript
-+{
-+public:
-+    OllamaChatMemoryGuildScript() : GuildScript("OllamaChatMemoryGuildScript") { }
-+
-+    void OnRemoveMember(Guild* /*guild*/, Player* player, bool /*isDisbanding*/, bool /*isKicked*/) override
-+    {
-+        if (!g_EnableEventMemory || !player)
-+            return;
-+
-+        PurgePlayerMemories(player->GetGUID().GetRawValue());
-+    }
-+};
-+
-+// --------------------------------------------------------------------------
-+// BGScript: on arena/battleground end, every random bot records a memory about
-+// each REAL teammate it just shared the match with. This is the memory behind
-+// the driving example -- a player finishes an arena on the bot's team, then
-+// flames the bot, and the bot recalls it just played an arena with them.
-+// --------------------------------------------------------------------------
-+class OllamaChatMemoryBGScript : public BGScript
-+{
-+public:
-+    OllamaChatMemoryBGScript() : BGScript("OllamaChatMemoryBGScript") { }
-+
-+    void OnBattlegroundEnd(Battleground* bg, TeamId /*winnerTeamId*/) override
-+    {
-+        if (!g_Enable || !g_EnableEventMemory || !bg)
-+            return;
-+
-+        bool isArena          = bg->isArena();
-+        std::string eventType = isArena ? "arena" : "battleground";
-+        std::string detail    = isArena ? "were on an arena team with them"
-+                                        : "fought alongside them in a battleground";
-+
-+        // Split the roster by team into real players and random bots.
-+        std::array<std::vector<Player*>, PVP_TEAMS_COUNT> realPlayers;
-+        std::array<std::vector<Player*>, PVP_TEAMS_COUNT> bots;
-+
-+        for (auto const& pair : bg->GetPlayers())
-+        {
-+            Player* p = pair.second;
-+            if (!p || !p->IsInWorld())
-+                continue;
-+
-+            TeamId team = p->GetBgTeamId();
-+            if (team != TEAM_ALLIANCE && team != TEAM_HORDE)
-+                continue;
-+
-+            if (PlayerbotsMgr::instance().GetPlayerbotAI(p))
-+            {
-+                if (sRandomPlayerbotMgr.IsRandomBot(p))
-+                    bots[team].push_back(p);
-+            }
-+            else
-+            {
-+                realPlayers[team].push_back(p);
-+            }
-+        }
-+
-+        // Each bot remembers each real teammate it fought alongside.
-+        for (uint8 team = 0; team < PVP_TEAMS_COUNT; ++team)
-+        {
-+            for (Player* bot : bots[team])
-+                for (Player* player : realPlayers[team])
-+                    RecordMemory(bot, player, eventType, detail);
-+        }
-+    }
-+};
-+
-+// Registration entry point. Call this from Addmod_ollama_chatScripts() in
-+// mod-ollama-chat_main.cpp (see the registration note reported to the user).
-+void AddSC_mod_ollama_chat_memory()
-+{
-+    new OllamaChatMemoryGuildScript();
-+    new OllamaChatMemoryBGScript();
-+}
-diff --git a/src/mod-ollama-chat_memory.h b/src/mod-ollama-chat_memory.h
-new file mode 100644
-index 0000000..c4004a5
---- /dev/null
-+++ b/src/mod-ollama-chat_memory.h
-@@ -0,0 +1,52 @@
-+#ifndef MOD_OLLAMA_CHAT_MEMORY_H
-+#define MOD_OLLAMA_CHAT_MEMORY_H
-+
-+#include <string>
-+#include <cstdint>
-+
-+class Player;
-+
-+// --------------------------------------------------------------------------
-+// Bot event-memory subsystem.
-+//
-+// A random bot records a small, bounded set of "meaningful" shared moments with
-+// a REAL, currently-guilded player (duel, group, guild, shared arena/
-+// battleground) and later references them in chat via the {memory_info}
-+// prompt placeholder.
-+//
-+// Performance strategy (deliberately simple -- do NOT add DB compression):
-+//   * guilded-players-only : memories are only recorded/kept about players who
-+//                            are in a guild, and every row about a player is
-+//                            purged when they leave one. This bounds the table
-+//                            to currently-guilded players.
-+//   * per-pair cap         : at most g_EventMemoryMaxPerPair rows per
-+//                            (bot, player) pair; the oldest are pruned on
-+//                            insert.
-+// Bounding + guilded-only IS the performance strategy; row compression here
-+// would be over-engineering.
-+// --------------------------------------------------------------------------
-+
-+// Record one meaningful moment: `bot` (a random bot) remembers `player`.
-+// No-op unless memory is enabled, `player` is guilded, `bot` is a random bot,
-+// and `player` is a real (non-bot) player.
-+void RecordMemory(Player* bot, Player* player, std::string const& eventType, std::string const& detail);
-+
-+// Record a moment for an unordered pair, auto-detecting which side is the bot
-+// and which is the real player. Convenient to drop in beside a symmetric
-+// NudgeSentimentPair() call. Records at most one direction (bot remembers
-+// player); a no-op unless exactly one side is a bot.
-+void RecordMemoryForPair(Player* a, Player* b, std::string const& eventType, std::string const& detail);
-+
-+// Build the "{memory_info}" prompt fragment listing a bot's recent memories of
-+// a player, most-recent first. Returns "" when there is nothing to recall.
-+std::string BuildMemoryInfo(Player* bot, Player* player);
-+
-+// Delete every memory row referencing this player (called when the player
-+// leaves a guild). Keeps storage bounded to currently-guilded players.
-+void PurgePlayerMemories(uint64_t playerGuid);
-+
-+// Registers the memory hook scripts (guild-leave purge + arena/BG recorder).
-+// Call from Addmod_ollama_chatScripts() in mod-ollama-chat_main.cpp.
-+void AddSC_mod_ollama_chat_memory();
-+
-+#endif // MOD_OLLAMA_CHAT_MEMORY_H
 diff --git a/src/mod-ollama-chat_personality.cpp b/src/mod-ollama-chat_personality.cpp
 index 34eb2d2..50f1367 100644
 --- a/src/mod-ollama-chat_personality.cpp
