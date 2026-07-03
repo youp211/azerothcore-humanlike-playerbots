@@ -1,0 +1,17 @@
+[Unit]
+Description=AzerothCore worldserver (realm Gigi, 500 playerbots)
+After=network-online.target mariadb.service ollama.service wow-auth.service
+Wants=network-online.target mariadb.service
+
+[Service]
+User=admin
+WorkingDirectory=/home/admin/git/wow/server/bin
+ExecStartPre=/bin/sh -c '! pgrep -x worldserver'
+ExecStart=/home/admin/git/wow/server/bin/worldserver
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=90
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

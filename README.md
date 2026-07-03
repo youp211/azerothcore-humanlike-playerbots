@@ -41,21 +41,48 @@ Repo layout: work was developed on branches (`gpu-box`, `ollama-chat-mods`,
 
 ## Running the server
 
+Two ways — don't mix them (the script refuses to start while the units are active):
+
+**Manual with consoles** (day-to-day):
+
 ```bash
-cd /home/admin/git/wow/server/bin
-tmux new-session -d -s auth  './authserver'
-tmux new-session -d -s world './worldserver'     # or: tmux new -d -s world /home/admin/git/wow/restart-world.sh
+./start.sh            # both servers in tmux, with AC> consoles
+./start.sh status     # processes / ports / sessions
+./start.sh stop       # graceful shutdown
 ```
 
-- `tmux attach -t world` gives you the interactive `AC>` console (detach: `Ctrl-b d`).
-- Stop cleanly: type `server shutdown 10` in the console (or `tmux send-keys -t world 'server shutdown 10' Enter`).
-- MariaDB and Ollama are systemd services and start on boot; the game servers currently do not (start them via tmux as above).
+`tmux attach -t world` (or `-t auth`) for the console; detach with `Ctrl-b d`.
+
+**systemd** (survives reboots, auto-restarts on crash, no console — use in-game
+GM commands instead). Units are installed at `/etc/systemd/system/` (tracked
+copies in `systemd/`) and **enabled**, so a reboot brings the realm up by itself:
+
+```bash
+sudo systemctl start|stop|status wow-auth wow-world
+journalctl -u wow-world -f        # server output
+```
+
+If you want console mode after a reboot: `sudo systemctl stop wow-auth wow-world`
+then `./start.sh`. MariaDB and Ollama are separate systemd services (also on boot).
+
+### Quick test from the client
+
+1. **Is the server up?** `pgrep authserver worldserver` should show both, and
+   `ss -tln | grep -E "3724|8085"` both ports. Bots online:
+   `sudo mariadb -N -e "SELECT COUNT(*) FROM acore_characters.characters WHERE online=1;"`
+2. **No new user needed** — the `admin` account already exists (GM level 3,
+   initial password `changeme123`). Log in with it, create a character, `/who`
+   to see the bots.
+3. Local Wine client: the copy in the `~/.jwgui/prefixes/WoW` prefix is already
+   pointed at the realm. Launch with the input method disabled:
+   `XMODIFIERS="@im=none" WINEPREFIX=~/.jwgui/prefixes/WoW wine "C:\Program Files (x86)\World of Warcraft\Wow.exe"`
 
 ### Accounts & realm
 
 - GM account: `admin` (gmlevel 3). The initial password was a placeholder — change it:
   console `account set password admin <new> <new>`.
-- Create player accounts: `account create <name> <pass>` in the console.
+- Create player accounts (e.g. for friends): `account create <name> <pass>` in the
+  worldserver console (`tmux attach -t world`), or as a GM in-game: `.account create <name> <pass>`.
 - Realm: `Gigi` at `127.0.0.1:8085` (world), auth on `3724`. Both bind `0.0.0.0`.
   For WAN play, port-forward 3724 + 8085 and point the realm at your public IP/DDNS:
   ```sql

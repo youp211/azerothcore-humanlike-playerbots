@@ -1,0 +1,15 @@
+[Unit]
+Description=AzerothCore authserver (realm Gigi)
+After=network-online.target mariadb.service
+Wants=network-online.target mariadb.service
+
+[Service]
+User=admin
+WorkingDirectory=/home/admin/git/wow/server/bin
+ExecStartPre=/bin/sh -c '! pgrep -x authserver'
+ExecStart=/home/admin/git/wow/server/bin/authserver
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
