@@ -8,7 +8,11 @@ TRAIN_DIR="$HOME/wow-finetune"
 mkdir -p "$TRAIN_DIR" && cd "$TRAIN_DIR"
 
 echo "== ROCm check =="
-rocminfo | grep -m1 gfx || { echo "ROCm not working - install ROCm 7.x first (amdgpu-install --usecase=rocm)"; exit 1; }
+# NB: don't pipe rocminfo straight into grep -m1 — early grep exit SIGPIPEs
+# rocminfo, which pipefail turns into a bogus failure
+rocminfo > /tmp/rocminfo.$$ 2>&1 || true
+grep -m1 gfx /tmp/rocminfo.$$ || { rm -f /tmp/rocminfo.$$; echo "ROCm not working - install ROCm 7.x first (amdgpu-install --usecase=rocm)"; exit 1; }
+rm -f /tmp/rocminfo.$$
 
 echo "== Python venv =="
 python3 -m venv venv
@@ -35,6 +39,10 @@ fi
 cmake -S llama.cpp -B llama.cpp/build -DGGML_CUDA=OFF -DGGML_HIP=OFF
 cmake --build llama.cpp/build --target llama-quantize -j "$(nproc)"
 pip install -r llama.cpp/requirements/requirements-convert_hf_to_gguf.txt
+# llama.cpp's requirements pull in a CPU torch from PyPI over the ROCm build —
+# re-pin the ROCm wheels afterwards or the GPU disappears from torch
+uv pip install "torch>=2.4,<2.11.0" "torchvision<0.26.0" "torchaudio<2.11.0" \
+    --index-url https://download.pytorch.org/whl/rocm7.1 --upgrade --force-reinstall
 
 echo "== GPU visible to torch? =="
 python - <<'EOF'

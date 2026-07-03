@@ -29,8 +29,8 @@ echo "Applied: Url=http://$IP:11434, Model=$MODEL, MaxConcurrentQueries=8, Typin
 
 # Hot-reload if the worldserver is running in the 'world' tmux session
 if tmux has-session -t world 2>/dev/null; then
-    tmux send-keys -t world '.ollama reload' Enter
-    echo "Sent .ollama reload to worldserver console."
+    tmux send-keys -t world 'ollama reload' Enter
+    echo "Sent 'ollama reload' to worldserver console."
 else
     echo "worldserver tmux session not found - run '.ollama reload' in its console yourself."
 fi
