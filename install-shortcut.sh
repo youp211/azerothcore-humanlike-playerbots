@@ -13,7 +13,7 @@ mkdir -p "$ICON_DIR" "$APP_DIR"
 if [ ! -f "$ICON_DIR/wow-gigi.png" ]; then
     if command -v wrestool > /dev/null && command -v icotool > /dev/null; then
         tmp=$(mktemp -d)
-        wrestool -x -t14 "$ROOT/wotlk/wotlk/Wow.exe" -o "$tmp/wow.ico" 2>/dev/null || true
+        wrestool -x -t14 "$ROOT/client/wotlk/Wow.exe" -o "$tmp/wow.ico" 2>/dev/null || true
         icotool -x "$tmp/wow.ico" -o "$tmp" 2>/dev/null || true
         biggest=$(ls -S "$tmp"/wow_*.png 2>/dev/null | head -1 || true)
         [ -n "$biggest" ] && cp "$biggest" "$ICON_DIR/wow-gigi.png"
@@ -29,7 +29,7 @@ Type=Application
 Name=World of Warcraft (Gigi)
 Comment=WotLK 3.3.5a - local realm (self-healing launcher)
 Exec=$ROOT/launch-client.sh
-Path=$ROOT/wotlk/wotlk
+Path=$ROOT/client/wotlk
 Icon=$ICON_DIR/wow-gigi.png
 Categories=Game;
 StartupNotify=false

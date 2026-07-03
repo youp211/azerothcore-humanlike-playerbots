@@ -172,13 +172,21 @@ def make_gear_context(rng, player):
     ilvl_phrase = "empty" if ilvl == 0 else f"item level {ilvl}"
     ctx = (f"(You inspected {name}: their weakest piece is the {slot} ({ilvl_phrase}). "
            f"As a class they want {stat}.")
-    item = None
-    if rng.random() < 0.6:
+    # The server only mentions an item when it ACTUALLY mailed it (strings
+    # mirror GenerateGearContext in mod-ollama-chat_handler.cpp)
+    item, kind = None, "weak"
+    r2 = rng.random()
+    if r2 < 0.12:
         item = rng.choice(GEAR_ITEMS[armor_class_for(player["class"], player["level"])])
-        offer_ilvl = min(80, max(ilvl + rng.randint(4, 15), 5))
-        ctx += f" In your bags: {item} (item level {offer_ilvl}) - you could offer or sell it to them."
+        ctx += f" You just mailed them your {item} as a gift - tell them to check their mailbox."
+        kind = "gift"
+    elif r2 < 0.17:
+        item = rng.choice(GEAR_ITEMS[armor_class_for(player["class"], player["level"])])
+        ctx += (f" You just mailed them your {item} with a {rng.randint(1, 30)} silver COD"
+                f" - tell them to check their mailbox and pay up.")
+        kind = "cod"
     ctx += ")"
-    return ctx, "weak", slot, stat, item
+    return ctx, kind, slot, stat, item
 
 # ---------------------------------------------------------------------------
 # Incoming player messages by category
@@ -211,6 +219,9 @@ MSGS = {
     "duel": ["duel me", "1v1 me outside org", "wanna duel while we wait", "you vs me right now"],
     "bg": ["you queueing wsg", "horde keeps winning av today", "wanna premade arathi basin",
            "whats your honor at"],
+    # asking a bot to name a price on gear it's selling - personality drives it
+    "pricing": ["how much you want for that", "whats your price on it", "name your price",
+                "you selling that? how much", "what do you want for it", "gimme a price"],
 }
 
 # ---------------------------------------------------------------------------
@@ -220,6 +231,8 @@ MSGS = {
 # ---------------------------------------------------------------------------
 
 GENERIC = {
+    "pricing": ["eh, few silver? i dunno what its worth", "make me an offer", "whatever seems fair to you",
+                "couple silver and its yours", "i just wanna get rid of it honestly"],
     "greeting": ["hey", "yo whats up", "hey {pname}", "sup", "o/", "hey man hows it going"],
     "hows_it_going": ["slow grind but getting there", "cant complain, {zone} is decent xp",
                       "just hit {level} actually", "same old, kill loot repeat", "pretty good, you?"],
@@ -240,8 +253,10 @@ GENERIC = {
     # gear talk when the prompt carries a gear-inspect context
     "gear_advice": ["that {slot} needs an upgrade man", "{stat} is what you want as a {pclass_lower}",
                     "hit the AH for a new {slot}", "quest rewards around here beat that {slot} easy"],
-    "gear_offer": ["got a spare {item} if you want it", "ill trade you this {item}, beats your {slot}",
-                   "take this {item} man, i dont need it", "you want this {item}? has the {stat} you need"],
+    "gear_gift": ["sent you that {item}, check your mail", "mailed you the {item}, its yours",
+                  "check your mailbox, theres a {item} in it", "just mailed you a {item} for that {slot}"],
+    "gear_cod": ["mailed you the {item}, pay the COD lol", "{item} is in your mail. its not free hehe",
+                 "check your mail, {item} inside. costs a few silver", "sent the {item} COD. business is business"],
     "gear_good": ["nice gear man", "yeah youre set, no notes", "solid setup honestly",
                   "cant teach you anything about gearing lol", "geared. respect"],
 }
@@ -265,6 +280,7 @@ BANKS = {
         "insult": ["whatever still need a {role} lol"], "compliment": ["thanks! wanna run {dungeon}?"],
     },
     "SCARED_NEWBIE": {
+        "pricing": ["um is 1 silver ok?? sorry i dont know prices", "whatever you think is fair!! im bad at this"],
         "greeting": ["oh hi!! sorry didnt see you there", "hello! am i in the right zone??"],
         "hows_it_going": ["i died like 6 times but im learning!!", "honestly kind of lost but having fun"],
         "directions": ["oh no i was going to ask YOU that", "i think its that way? im so bad at this sorry"],
@@ -354,6 +370,7 @@ BANKS = {
         "bg": ["bgs as a {bclass} is just a death simulator", "i queue to feed honor apparently"],
     },
     "GOLD_FARMER": {
+        "pricing": ["10 percent under AH, final", "checked the market, its 8g", "i know exactly what its worth. 8g"],
         "greeting": ["yo. hows your gold per hour", "hey, market is spicy today"],
         "trade": ["ill take the whole stack at 20 percent under AH", "undercutting me? bold move"],
         "smalltalk": ["this convo is costing me like 4g in farm time lol", "arctic fur is up 30 percent btw"],
@@ -398,6 +415,7 @@ BANKS = {
         "bg": ["i always get lost in wsg lol", "protect me in av and ill be ur bff"],
     },
     "ELITE_ARENA_PVPER": {
+        "pricing": ["50g. resilience isnt cheap", "if you have to ask you cant afford it", "market rate plus the elitist tax"],
         "greeting": ["what rating", "sup casual"],
         "hows_it_going": ["grinding rating not levels", "waiting on arena queue"],
         "insult": ["stay 1200", "get good"],
@@ -419,62 +437,61 @@ BANKS = {
 GEAR_BANKS = {
     "WOW_MOM": {
         "gear_advice": ["oh sweetie, that {slot} won't do! We'll find you {stat} gear!", "Your {slot} needs love, dear. Look for {stat}!"],
-        "gear_offer": ["Oh! Take this {item}, sweetie, I was saving it for someone like you!", "Here honey, this {item} has your name on it!"],
+        "gear_gift": ["Sent you a little care package sweetie, check your mail!", "Mailed you that {item}, honey. No arguments!"],
         "gear_good": ["Look at YOU, all geared up! So proud!", "Oh my, fancy armor! Well done sweetie!"],
     },
     "CHILL_DAD": {
         "gear_advice": ["that {slot} carried you this far but yeah, upgrade time", "grab some {stat} gear when you can, no rush"],
-        "gear_offer": ["got a spare {item} kiddo, all yours", "take the {item}, no charge. pay it forward"],
+        "gear_gift": ["mailed you the {item} kiddo, no charge. pay it forward", "check your mail, the {item} is yours"],
         "gear_good": ["clean setup. take care of it", "nothing to add, looking sharp"],
     },
     "HEALER_MAIN": {
         "gear_advice": ["your {slot} is why my mana bar cries", "{stat} please. for both our sakes"],
-        "gear_offer": ["take this {item} so i heal you less", "free {item} if you promise to avoid fire"],
+        "gear_gift": ["mailed you a {item} so i heal you less", "check your mail. now avoid fire"],
         "gear_good": ["geared AND probably still stands in fire", "nice. less healing work for me then"],
     },
     "HUMBLE_FARMER": {
         "gear_advice": ["that {slot} has seen some seasons. upgrade soon", "steady {stat} pieces, one at a time"],
-        "gear_offer": ["found this {item} out farming, yours if you want", "take the {item} friend, the mobs provide"],
+        "gear_gift": ["mailed you a {item} i found farming, friend", "the mobs provide. check your mailbox"],
         "gear_good": ["good gear. honest work behind it im sure"],
     },
     "EGIRL": {
         "gear_advice": ["nooo ur {slot} D: we need to fix that bestie", "u need {stat} gear asap uwu"],
-        "gear_offer": ["omg take this {item} cutie its literally perfect for u ^_^", "gifting u my {item} bc ur nice hehe~"],
+        "gear_gift": ["check ur mail cutie i sent u a present ^_^", "mailed u my {item} bc ur nice hehe~"],
         "gear_good": ["omg ur gear is so shiny~ matching and everything", "ok fashion AND function?? slay hehe"],
     },
     "GOLD_FARMER": {
         "gear_advice": ["upgrade that {slot} or keep losing dps. AH has {stat} cheap rn", "that {slot} is costing you gold in repair deaths"],
-        "gear_offer": ["selling this {item}, perfect {stat} piece for you. cheap", "got a {item} right here. 5g and its yours"],
+        "gear_cod": ["mailed you the {item} COD. business is business", "{item} in your mail. pay the COD, its cheap"],
         "gear_good": ["good gear. now buy consumables, i sell those", "geared and rich i bet. lets talk business"],
     },
     "ELITE_ARENA_PVPER": {
         "gear_advice": ["that {slot} is free HKs walking", "get good before you get gear", "gear check failed. stay 1200"],
-        "gear_offer": ["i have a {item} better than your whole set. embarrassing", "could give you my {item} but the skill issue remains"],
-        "gear_good": ["finally someone with resilience. whats your rating tho", "pve epics lol. arena is harder", "decent. now earn it where it matters"],
+                "gear_good": ["finally someone with resilience. whats your rating tho", "pve epics lol. arena is harder", "decent. now earn it where it matters"],
     },
     "PVP_TRASHTALKER": {
         "gear_advice": ["that {slot} is why you die in bgs lmaooo", "free kill detected"],
-        "gear_offer": ["ill sell you my {item} after i farm you in a bg lol"],
-        "gear_good": ["nice gear. still farming you in wsg", "gear doesnt dodge for you lol"],
+                "gear_good": ["nice gear. still farming you in wsg", "gear doesnt dodge for you lol"],
     },
     "MIN_MAXER": {
+        "pricing": ["vendor is 4s, AH median is 6s, so 5s", "exactly 5 silver 2 copper. thats fair value"],
         "gear_advice": ["your {slot} is costing you exactly 4.2 percent dps", "wrong stats. {stat} or nothing"],
-        "gear_offer": ["my {item} outperforms your {slot} by 11 percent. take it", "the {item} is a strict upgrade. equip it"],
+        "gear_gift": ["mailed you the {item}. a strict upgrade. equip it"],
         "gear_good": ["acceptable. top decile for your level", "correctly itemized. rare"],
     },
     "HARDCORE_RAIDLEAD": {
         "gear_advice": ["that {slot} wouldnt pass my gear check", "no raid spot until the {slot} is fixed"],
-        "gear_offer": ["take the {item} and never show up geared like this again"],
+        "gear_gift": ["mailed you a {item}. never show up geared like that again"],
         "gear_good": ["youd pass my gear check. applications open", "acceptable. raid spot pending attitude check"],
     },
     "GRUMPY_VETERAN": {
         "gear_advice": ["in my day we earned our {slot} pieces", "seen worse. barely"],
-        "gear_offer": ["take the {item}. consider it charity from a relic"],
+        "gear_gift": ["mailed you the {item}. charity from a relic"],
         "gear_good": ["decent. wouldve taken a year to farm that in vanilla", "fine gear. kids get everything easy now"],
     },
     "UNHINGED_TROLL": {
         "gear_advice": ["your {slot} is a government listening device", "the {slot} slot isnt real. wake up"],
-        "gear_offer": ["this {item} is cursed but its yours", "trade you this {item} for your soul (or 2g)"],
+        "gear_gift": ["mailed you the {item}. its cursed but its yours", "check your mail. the {item} knows things"],
         "gear_good": ["your gear is TOO good. what do you know", "clearly a gm alt. exposed"],
     },
     "SCARED_NEWBIE": {
@@ -483,12 +500,12 @@ GEAR_BANKS = {
     },
     "TWELVE_YEAR_OLD": {
         "gear_advice": ["EW your {slot} lol get the EPIC one", "my {slot} is way cooler no offense"],
-        "gear_offer": ["u can have my {item} i have TWO epic ones"],
+        "gear_gift": ["mailed u my {item} i have TWO epic ones"],
         "gear_good": ["WOAH EPICS thats so cool", "can i have your gear when u quit"],
     },
     "THEORYCRAFTER": {
         "gear_advice": ["your {slot} is roughly 38 dps below budget for your level", "{stat} scales best for you. the {slot} is the bottleneck"],
-        "gear_offer": ["this {item} is a 6.3 percent throughput gain for you. take it"],
+        "gear_gift": ["mailed you the {item}. a 6.3 percent throughput gain. take it"],
         "gear_good": ["itemization checks out. within 2 percent of the BiS curve", "clean stat allocation, actually impressive"],
     },
 }
@@ -607,12 +624,11 @@ def gen_chat_example(rng):
     if rng.random() < 0.35:
         gear_ctx, gkind, gslot, gstat, gitem = make_gear_context(rng, player)
         gear_ctx += " "
-        if rng.random() < 0.65 and sent_kind != "hostile":
+        # mailed an item -> ALWAYS acknowledge it; otherwise react 65% of the time
+        gcat = {"gift": "gear_gift", "cod": "gear_cod", "weak": "gear_advice"}.get(gkind, "gear_good")
+        must_react = gkind in ("gift", "cod")
+        if must_react or (rng.random() < 0.65 and sent_kind != "hostile"):
             gbank = GEAR_BANKS.get(pkey, {})
-            if gkind == "weak":
-                gcat = "gear_offer" if gitem and (gbank.get("gear_offer") or GENERIC.get("gear_offer")) else "gear_advice"
-            else:
-                gcat = "gear_good"
             greplies = gbank.get(gcat) or GENERIC[gcat]
             reply = (rng.choice(greplies).replace("{slot}", gslot or "gear").replace("{stat}", gstat)
                      .replace("{item}", gitem or "spare piece").replace("{pclass_lower}", player["class"].lower()))

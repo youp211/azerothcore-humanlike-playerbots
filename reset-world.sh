@@ -63,7 +63,7 @@ if [ "$NO_START" = 1 ]; then
     echo
     echo "Wiped. Realm left DOWN (--no-start). When you start it (./start.sh or"
     echo "systemd), the world re-imports and re-seeds itself; then the GM"
-    echo "account, realm row, and the 73-personality pool still need applying -"
+    echo "account, realm row, and the full personality pool still need applying -"
     echo "this script's tail does all three (or run it without --no-start next"
     echo "time for the full cycle)."
     exit 0
@@ -73,13 +73,13 @@ echo "== Starting servers (first boot re-imports everything; RNDBOT creation"
 echo "   takes 10-40 min of console spam - it is NOT hung) =="
 "$ROOT/start.sh" start
 
-echo "== Waiting for the personality templates table, then loading all 73 =="
+echo "== Waiting for the personality schema, then loading the full pool =="
 # The wipe drops the module's personality templates with the rest of the
-# characters DB; re-apply the 40 extra archetypes the moment the module's SQL
-# updater recreates the table, so bots roll from the weighted 73 pool from the
-# first login instead of the upstream 33 (which otherwise requires a
-# clear-assignments-and-restart dance later).
-until sudo mariadb -N -e "SELECT 1 FROM acore_characters.mod_ollama_chat_personality_templates LIMIT 1;" > /dev/null 2>&1; do
+# characters DB; re-apply the custom archetypes the moment the module's SQL
+# updater recreates them, so bots roll from the full weighted pool from the
+# first login. Probe the NEWEST migration's column (gear_give_chance), not
+# just the table - personalities.sql needs every behavior column to exist.
+until sudo mariadb -N -e "SELECT gear_give_chance FROM acore_characters.mod_ollama_chat_personality_templates LIMIT 1;" > /dev/null 2>&1; do
     pgrep -x worldserver > /dev/null || { echo "worldserver died during import - check server/bin/Errors.log"; exit 1; }
     sleep 5
 done
@@ -120,6 +120,23 @@ sql = (
 )
 subprocess.run(["sudo", "mariadb", "-e", sql], check=True)
 print(f"GM account '{user.lower()}' recreated (GM level 3)")
+EOF
+
+# Service account for mod-ah-bot (auction house buy-side). Created second,
+# right after the GM account, so its id is deterministically 2 on a fresh
+# wipe - mod_ahbot.conf's AuctionHouseBot.Account relies on that.
+GM_ACCOUNT="${WOW_AHBOT_ACCOUNT:-ahbot}" GM_PASSWORD="ahbot$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')" python3 - <<'EOF'
+import hashlib, os, subprocess
+N = int("894B645E89E1535BBDAD5B8B290650530801B18EBFBF5E8FAB3C82872A3E9BB7", 16)
+user = os.environ["GM_ACCOUNT"].upper()
+pw = os.environ["GM_PASSWORD"].upper()
+salt = os.urandom(32)
+h = hashlib.sha1(salt + hashlib.sha1(f"{user}:{pw}".encode()).digest()).digest()
+v = pow(7, int.from_bytes(h, "little"), N).to_bytes(32, "little")
+subprocess.run(["sudo", "mariadb", "-e",
+    f"INSERT INTO acore_auth.account (username, salt, verifier, expansion) "
+    f"VALUES ('{user}', 0x{salt.hex()}, 0x{v.hex()}, 2) ON DUPLICATE KEY UPDATE username=username;"], check=True)
+print(f"service account '{user.lower()}' created (random password; not for login)")
 EOF
 
 echo "== Restoring realm name/address =="

@@ -262,10 +262,10 @@ branch-per-component model, merged into `main` with merge commits:
 Deliberately **not** tracked (`.gitignore`): `azerothcore-wotlk/` and its
 modules (nested git clones — our changes live as patch files in `patches/`
 instead, see `patches/README.md` for apply/regenerate), `server/` (binaries,
-passworded configs, 5 GB data, logs), `wotlk*` (user's 50+ GB game clients),
+passworded configs, 5 GB data, logs), `client/` (user's 50+ GB game client),
 fine-tune model artifacts.
 
-The `wotlk/` client folder is itself a git repo (cloned from `devovh/wotlk`);
+The `client/` client folder is itself a git repo (cloned from `devovh/wotlk`);
 its realmlist/Config.wtf fixes are committed *there* (local only — don't push,
 the remote is someone else's).
 
@@ -400,7 +400,7 @@ validate exports.
 ## 18. Client setup
 
 Fresh prefix `~/.wine-wow` (wine + i386 already present), client run in place
-from `wotlk/wotlk/` (no 17 GB copy into the prefix this time). `Config.wtf`
+from `client/wotlk/` (no 17 GB copy into the prefix this time). `Config.wtf`
 carried the anti-freeze fixes (gxApi opengl, gxWindow 1, ToS flags);
 added `gxResolution 3840x2160`, `gxMaximize 1`, `useUiScale 1` for the 4K
 monitor. Stale `Cache/WDB` deleted after each world wipe. Desktop launcher

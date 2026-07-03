@@ -94,5 +94,25 @@ UPDATE `mod_ollama_chat_personality_templates` SET `playstyle` = 'pvper'
 UPDATE `mod_ollama_chat_personality_templates` SET `playstyle` = 'idler'
     WHERE `key` IN ('THEORYCRAFTER', 'CHILL_DAD', 'FISHERMAN', 'CLASS_DOOMER', 'BANK_ALT', 'NIGHT_OWL');
 
+-- ---------------------------------------------------------------------------
+-- Gear-give generosity (percent per gear-inspect context; module migration
+-- 2026_07_03_personality_gear_give.sql adds the column + tunes the upstream 33;
+-- unlisted keys keep the 2.0 default). Sellers (GOLD_FARMER, BANK_ALT) mail COD.
+-- ---------------------------------------------------------------------------
+UPDATE `mod_ollama_chat_personality_templates` SET `gear_give_chance` = 15
+    WHERE `key` IN ('WOW_MOM');
+UPDATE `mod_ollama_chat_personality_templates` SET `gear_give_chance` = 12
+    WHERE `key` IN ('CHILL_DAD', 'HUMBLE_FARMER');
+UPDATE `mod_ollama_chat_personality_templates` SET `gear_give_chance` = 10
+    WHERE `key` IN ('GOLD_FARMER', 'HEALER_MAIN');
+UPDATE `mod_ollama_chat_personality_templates` SET `gear_give_chance` = 8
+    WHERE `key` IN ('EGIRL', 'BANK_ALT', 'STOIC_PALADIN');
+UPDATE `mod_ollama_chat_personality_templates` SET `gear_give_chance` = 5
+    WHERE `key` IN ('SCARED_NEWBIE', 'GUILD_RECRUITER', 'WANDERING_RP');
+UPDATE `mod_ollama_chat_personality_templates` SET `gear_give_chance` = 1
+    WHERE `key` IN ('MIN_MAXER', 'UNHINGED_TROLL', 'HARDCORE_RAIDLEAD', 'FAIRWEATHER_FRIEND', 'SPEEDRUNNER');
+UPDATE `mod_ollama_chat_personality_templates` SET `gear_give_chance` = 0
+    WHERE `key` IN ('ELITE_ARENA_PVPER', 'PVP_TRASHTALKER');
+
 SELECT COUNT(*) AS total_personalities FROM `mod_ollama_chat_personality_templates`;
 SELECT `playstyle`, COUNT(*) AS n FROM `mod_ollama_chat_personality_templates` GROUP BY `playstyle`;

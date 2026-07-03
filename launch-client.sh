@@ -16,7 +16,7 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CLIENT="$ROOT/wotlk/wotlk"
+CLIENT="$ROOT/client/wotlk"
 
 # 1. name pinning (idempotent)
 grep -q "gigi.local" /etc/hosts 2>/dev/null || \
