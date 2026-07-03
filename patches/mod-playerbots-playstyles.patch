@@ -1187,12 +1187,417 @@ index dfbe1f96..0750915c 100644
          }
          else
              engine->addStrategiesNoInit("boost", "racials", "chat", "default", "aoe", "potions", "cast time", "dps assist", nullptr);
+diff --git a/src/Bot/Factory/GuildRecruitmentEvent.cpp b/src/Bot/Factory/GuildRecruitmentEvent.cpp
+new file mode 100644
+index 00000000..8ca23285
+--- /dev/null
++++ b/src/Bot/Factory/GuildRecruitmentEvent.cpp
+@@ -0,0 +1,324 @@
++/*
++ * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license, you may redistribute it
++ * and/or modify it under version 3 of the License, or (at your option), any later version.
++ */
++
++#include "GuildRecruitmentEvent.h"
++
++#include "Cell.h"
++#include "CellImpl.h"
++#include "Common.h"
++#include "Config.h"
++#include "DatabaseEnv.h"
++#include "GameTime.h"
++#include "GridNotifiers.h"
++#include "GridNotifiersImpl.h"
++#include "Guild.h"
++#include "Log.h"
++#include "ObjectAccessor.h"
++#include "Opcodes.h"
++#include "Player.h"
++#include "PlayerbotMgr.h"
++#include "Random.h"
++#include "StringFormat.h"
++#include "WorldPacket.h"
++#include "WorldSession.h"
++
++#include <list>
++#include <unordered_map>
++
++// Provided by mod-ollama-chat (same binary): make a bot SAY or WHISPER a short,
++// in-character, LLM-generated line about a concrete situation. Weakly optional -
++// if the chat module is disabled the symbol is null and the call is a no-op.
++// Sibling of PersonalityGuildFactory's OllamaChat_RenameGuildInVoice weak hook.
++[[gnu::weak]] void OllamaChat_SpeakSituation(Player* bot, Player* target, std::string const& situation, bool whisper);
++
++namespace
++{
++    // Heavy work (grid scans, pitches) is throttled to this cadence; the driver
++    // is called every world tick but only acts every ~5s.
++    constexpr uint32 kTickIntervalMs = 5 * IN_MILLISECONDS;
++    // Realm-start gate: skip recruitment when the server has been up longer.
++    constexpr uint32 kRealmStartUptimeSec = 30 * MINUTE;
++    // Hard cap on invites a single leader sends over the whole event.
++    constexpr uint32 kMaxInvitesPerLeader = 10;
++
++    void SpeakSituation(Player* bot, Player* target, std::string const& situation, bool whisper)
++    {
++        if (OllamaChat_SpeakSituation)
++            OllamaChat_SpeakSituation(bot, target, situation, whisper);
++    }
++
++    struct StartPos
++    {
++        uint32 mapId = 0;
++        float x = 0.0f;
++        float y = 0.0f;
++        float z = 0.0f;
++        float o = 0.0f;
++        TeamId team = TEAM_ALLIANCE;
++    };
++
++    // One starting spawn per race (Northshire, Coldridge, Valley of Trials, ...).
++    // Classes of the same race share a spawn, so the first row per race wins.
++    std::unordered_map<uint8, StartPos> LoadStartPositions()
++    {
++        std::unordered_map<uint8, StartPos> out;
++        QueryResult result = WorldDatabase.Query(
++            "SELECT race, map, position_x, position_y, position_z, orientation FROM playercreateinfo");
++        if (!result)
++            return out;
++
++        do
++        {
++            Field* fields = result->Fetch();
++            uint8 race = fields[0].Get<uint8>();
++            if (out.count(race))
++                continue;
++
++            StartPos pos;
++            pos.mapId = fields[1].Get<uint32>();
++            pos.x = fields[2].Get<float>();
++            pos.y = fields[3].Get<float>();
++            pos.z = fields[4].Get<float>();
++            pos.o = fields[5].Get<float>();
++            pos.team = Player::TeamIdForRace(race);
++            out[race] = pos;
++        } while (result->NextRow());
++
++        return out;
++    }
++
++    // Resolve the starting spawn for a leader: its own race first, else any
++    // same-faction race (defensive - every playable race has a createinfo row).
++    StartPos const* ResolveStart(std::unordered_map<uint8, StartPos> const& starts, Player* leader)
++    {
++        auto it = starts.find(leader->getRace());
++        if (it != starts.end())
++            return &it->second;
++
++        TeamId const team = leader->GetTeamId();
++        for (auto const& kv : starts)
++            if (kv.second.team == team)
++                return &kv.second;
++
++        return nullptr;
++    }
++
++    // Queue a CMSG_GUILD_INVITE on the leader's session for `target`, exactly as
++    // the real client would - mirrors the module's own GuildInviteAction (payload
++    // is just the invitee name). The session dispatches it to
++    // HandleGuildInviteOpcode on its next update, running the full core path
++    // (faction / already-guilded / already-invited / rank checks) and popping the
++    // SMSG_GUILD_INVITE dialog on the target. QueuePacket takes ownership.
++    void SendGuildInvite(Player* leader, Player* target)
++    {
++        WorldSession* session = leader->GetSession();
++        if (!session)
++            return;
++
++        WorldPacket* data = new WorldPacket(CMSG_GUILD_INVITE);
++        *data << target->GetName();
++        session->QueuePacket(data);
++    }
++
++    // First nearby REAL player that is a fresh, unguilded, same-faction recruit
++    // this leader has not already invited. Returns nullptr when none qualify.
++    Player* FindNearbyRecruit(Player* leader, float range, std::unordered_set<ObjectGuid> const& alreadyInvited)
++    {
++        std::list<Player*> nearby;
++        Acore::AnyPlayerInObjectRangeCheck check(leader, range);
++        Acore::PlayerListSearcher<Acore::AnyPlayerInObjectRangeCheck> searcher(leader, nearby, check);
++        Cell::VisitObjects(leader, searcher, range);
++
++        TeamId const team = leader->GetTeamId();
++        for (Player* target : nearby)
++        {
++            if (!target || target == leader)
++                continue;
++            if (sPlayerbotsMgr.GetPlayerbotAI(target))  // skip bots - invite REAL players only
++                continue;
++            if (target->GetTeamId() != team)  // guild invites are same-faction
++                continue;
++            if (target->GetLevel() >= 10)  // brand-new players only
++                continue;
++            if (target->GetGuildId() || target->GetGuildIdInvited())
++                continue;  // already guilded, or already has a pending invite
++            if (alreadyInvited.count(target->GetGUID()))
++                continue;  // one invite per player per leader
++
++            return target;
++        }
++
++        return nullptr;
++    }
++}  // namespace
++
++GuildRecruitmentEvent& GuildRecruitmentEvent::instance()
++{
++    static GuildRecruitmentEvent instance;
++    return instance;
++}
++
++void GuildRecruitmentEvent::Begin(std::vector<std::pair<ObjectGuid, std::string>> const& leaders)
++{
++    if (!sConfigMgr->GetOption<bool>("AiPlayerbot.GuildRecruitEnabled", true))
++        return;
++
++    // At least one guild must have formed this process (non-empty leaders), and
++    // it must be a realm start - not a long-running server that happened to form
++    // a guild much later.
++    if (leaders.empty())
++        return;
++
++    if (uint32(GameTime::GetUptime().count()) >= kRealmStartUptimeSec)
++    {
++        LOG_INFO("playerbots", "[GuildRecruit] Skipping recruitment - server uptime exceeds {} min",
++                 kRealmStartUptimeSec / MINUTE);
++        return;
++    }
++
++    uint32 const minutes = sConfigMgr->GetOption<uint32>("AiPlayerbot.GuildRecruitMinutes", 15);
++
++    std::unordered_map<uint8, StartPos> const starts = LoadStartPositions();
++    if (starts.empty())
++    {
++        LOG_WARN("playerbots", "[GuildRecruit] No playercreateinfo start positions found; recruitment disabled");
++        return;
++    }
++
++    for (auto const& entry : leaders)
++    {
++        Player* leader = ObjectAccessor::FindPlayer(entry.first);
++        if (!leader)
++            continue;
++
++        StartPos const* start = ResolveStart(starts, leader);
++        if (!start)
++            continue;
++
++        Recruiter recruiter;
++        recruiter.leaderGuid = entry.first;
++        recruiter.archetype = entry.second;
++        recruiter.guildId = leader->GetGuildId();
++        if (Guild* guild = leader->GetGuild())
++            recruiter.guildName = guild->GetName();
++        recruiter.returnMapId = leader->GetMapId();
++        recruiter.returnX = leader->GetPositionX();
++        recruiter.returnY = leader->GetPositionY();
++        recruiter.returnZ = leader->GetPositionZ();
++        recruiter.returnO = leader->GetOrientation();
++        recruiter.remainingMs = minutes * MINUTE * IN_MILLISECONDS;
++        recruiter.nextPitchMs = urand(10, 20) * IN_MILLISECONDS;  // first pitch shortly after arrival
++
++        leader->TeleportTo(start->mapId, start->x, start->y, start->z, start->o);
++
++        LOG_INFO("playerbots", "[GuildRecruit] {} left to recruit for {} guild '{}' at its starting area",
++                 leader->GetName(), recruiter.archetype, recruiter.guildName);
++
++        _recruiters.push_back(std::move(recruiter));
++    }
++
++    _tickAccumMs = 0;
++}
++
++void GuildRecruitmentEvent::Update(uint32 diff)
++{
++    if (_recruiters.empty())
++        return;
++
++    _tickAccumMs += diff;
++    if (_tickAccumMs < kTickIntervalMs)
++        return;
++
++    uint32 const elapsed = _tickAccumMs;
++    _tickAccumMs = 0;
++    Tick(elapsed);
++}
++
++void GuildRecruitmentEvent::Tick(uint32 elapsed)
++{
++    float const range = sConfigMgr->GetOption<float>("AiPlayerbot.GuildRecruitInviteRange", 20.0f);
++
++    for (size_t i = 0; i < _recruiters.size();)
++    {
++        Recruiter& recruiter = _recruiters[i];
++
++        Player* leader = ObjectAccessor::FindPlayer(recruiter.leaderGuid);
++        if (!leader)
++        {
++            // Leader logged out mid-event: drop it, nothing to teleport back.
++            LOG_INFO("playerbots", "[GuildRecruit] Leader for '{}' went offline; ending recruitment ({} invites sent)",
++                     recruiter.guildName, recruiter.invitesSent);
++            _recruiters.erase(_recruiters.begin() + i);
++            continue;
++        }
++
++        // Window elapsed -> teleport home and finish.
++        if (recruiter.remainingMs <= elapsed)
++        {
++            Finish(recruiter, true);
++            _recruiters.erase(_recruiters.begin() + i);
++            continue;
++        }
++        recruiter.remainingMs -= elapsed;
++
++        // Wait until the cross-map teleport has landed before pitching or scanning -
++        // mid-teleport the leader has no valid grid neighbours.
++        if (leader->IsBeingTeleported() || !leader->IsInWorld())
++        {
++            ++i;
++            continue;
++        }
++
++        // Periodic in-voice pitch (every 60-90s, jittered per leader).
++        if (recruiter.nextPitchMs <= elapsed)
++        {
++            recruiter.nextPitchMs = urand(60, 90) * IN_MILLISECONDS;
++            SpeakSituation(leader, nullptr,
++                           Acore::StringFormat(
++                               "you're recruiting new members for your {} guild '{}' at the starting area - "
++                               "make a short friendly recruitment pitch to the new players around",
++                               recruiter.archetype, recruiter.guildName),
++                           false);
++            LOG_DEBUG("playerbots", "[GuildRecruit] {} pitched '{}'", leader->GetName(), recruiter.guildName);
++        }
++        else
++        {
++            recruiter.nextPitchMs -= elapsed;
++        }
++
++        // Invite one nearby fresh real player per tick (spreads invites naturally
++        // as newcomers wander in, and avoids a burst of whispers).
++        if (recruiter.invitesSent < kMaxInvitesPerLeader)
++        {
++            if (Player* target = FindNearbyRecruit(leader, range, recruiter.invited))
++            {
++                SendGuildInvite(leader, target);
++                recruiter.invited.insert(target->GetGUID());
++                ++recruiter.invitesSent;
++                LOG_INFO("playerbots", "[GuildRecruit] {} invited {} to '{}' ({}/{})", leader->GetName(),
++                         target->GetName(), recruiter.guildName, recruiter.invitesSent, kMaxInvitesPerLeader);
++                SpeakSituation(
++                    leader, target,
++                    Acore::StringFormat("you just sent {} a guild invite - tell them what your guild is about, briefly",
++                                        target->GetName()),
++                    true);
++            }
++        }
++
++        ++i;
++    }
++}
++
++void GuildRecruitmentEvent::Finish(Recruiter const& recruiter, bool teleportBack)
++{
++    Player* leader = ObjectAccessor::FindPlayer(recruiter.leaderGuid);
++    if (leader && teleportBack)
++        leader->TeleportTo(recruiter.returnMapId, recruiter.returnX, recruiter.returnY, recruiter.returnZ,
++                           recruiter.returnO);
++
++    std::string const who = leader ? leader->GetName() : recruiter.leaderGuid.ToString();
++    LOG_INFO("playerbots", "[GuildRecruit] {} finished recruiting for '{}' ({} invites sent)", who, recruiter.guildName,
++             recruiter.invitesSent);
++}
+diff --git a/src/Bot/Factory/GuildRecruitmentEvent.h b/src/Bot/Factory/GuildRecruitmentEvent.h
+new file mode 100644
+index 00000000..d8c46e77
+--- /dev/null
++++ b/src/Bot/Factory/GuildRecruitmentEvent.h
+@@ -0,0 +1,69 @@
++/*
++ * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license, you may redistribute it
++ * and/or modify it under version 3 of the License, or (at your option), any later version.
++ */
++
++#ifndef PLAYERBOTS_GUILDRECRUITMENTEVENT_H
++#define PLAYERBOTS_GUILDRECRUITMENTEVENT_H
++
++#include "ObjectGuid.h"
++
++#include <string>
++#include <unordered_set>
++#include <utility>
++#include <vector>
++
++// Realm-start guild recruitment. Right after personality guilds form on a fresh
++// world, each guild LEADER travels to its faction's starting area and spends
++// ~15 minutes recruiting: it periodically pitches its guild in its own voice and
++// sends guild invites to nearby unguilded, low-level REAL players (the invite
++// popup is the ask - very 2008). When the window closes each leader teleports
++// back to where it was and resumes normal bot life. Driven from a world-thread
++// tick; cheap when idle. Guarded so it only fires as a realm-start experience.
++class GuildRecruitmentEvent
++{
++public:
++    static GuildRecruitmentEvent& instance();
++
++    // Called at the end of PersonalityGuildFactory::FormPersonalityGuilds with
++    // the freshly-formed guild leaders (leader guid + archetype name). Teleports
++    // each leader to its race's starting area and opens a recruiting window.
++    // No-op when disabled, when leaders is empty, or when the server has been up
++    // too long (not a realm start).
++    void Begin(std::vector<std::pair<ObjectGuid, std::string>> const& leaders);
++
++    // World-thread tick driver; call every world update. Returns immediately when
++    // no recruitment is in progress. Heavy work is throttled to every ~5s.
++    void Update(uint32 diff);
++
++private:
++    GuildRecruitmentEvent() = default;
++
++    struct Recruiter
++    {
++        ObjectGuid leaderGuid;
++        std::string archetype;
++        std::string guildName;
++        uint32 guildId = 0;
++
++        // Where the leader was before it left to recruit - teleported back after.
++        uint32 returnMapId = 0;
++        float returnX = 0.0f;
++        float returnY = 0.0f;
++        float returnZ = 0.0f;
++        float returnO = 0.0f;
++
++        uint32 remainingMs = 0;   // recruiting window left
++        uint32 nextPitchMs = 0;   // countdown to the next in-voice pitch
++        uint32 invitesSent = 0;   // total invites this event (capped)
++        std::unordered_set<ObjectGuid> invited;  // players already invited by this leader
++    };
++
++    void Tick(uint32 elapsed);
++    void Finish(Recruiter const& recruiter, bool teleportBack);
++
++    std::vector<Recruiter> _recruiters;
++    uint32 _tickAccumMs = 0;
++};
++
++#endif
 diff --git a/src/Bot/Factory/PersonalityGuildFactory.cpp b/src/Bot/Factory/PersonalityGuildFactory.cpp
 new file mode 100644
-index 00000000..79854647
+index 00000000..ba3f09ea
 --- /dev/null
 +++ b/src/Bot/Factory/PersonalityGuildFactory.cpp
-@@ -0,0 +1,365 @@
+@@ -0,0 +1,376 @@
 +/*
 + * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license, you may redistribute it
 + * and/or modify it under version 3 of the License, or (at your option), any later version.
@@ -1204,6 +1609,7 @@ index 00000000..79854647
 +#include "DatabaseEnv.h"
 +#include "Guild.h"
 +#include "GuildMgr.h"
++#include "GuildRecruitmentEvent.h"
 +#include "Log.h"
 +#include "ObjectAccessor.h"
 +#include "Player.h"
@@ -1403,6 +1809,10 @@ index 00000000..79854647
 +    // Bots that have been placed (as leader or member) or are otherwise unusable.
 +    std::unordered_set<uint32> committed;
 +
++    // Freshly-formed guild leaders (guid + archetype), handed to the realm-start
++    // recruitment event once all guilds are formed.
++    std::vector<std::pair<ObjectGuid, std::string>> recruitLeaders;
++
 +    // Finds the first usable leader for an archetype; marks unusable candidates
 +    // committed so they are not reconsidered. Returns nullptr if none remain.
 +    auto findLeader = [&](PersonalitySet const& leaderSet, Candidate& outLeader) -> Player*
@@ -1480,6 +1890,7 @@ index 00000000..79854647
 +                 ArchetypeName(archetype), name, leaderPlayer->GetName(), leader.personality, memberCount);
 +        if (guild)
 +            SpeakGuildName(leaderPlayer, guild->GetId(), ArchetypeName(archetype));
++        recruitLeaders.emplace_back(leaderPlayer->GetGUID(), ArchetypeName(archetype));
 +        return true;
 +    };
 +
@@ -1537,6 +1948,7 @@ index 00000000..79854647
 +                 leaderPlayer->GetName(), leader.personality, memberCount);
 +        if (guild)
 +            SpeakGuildName(leaderPlayer, guild->GetId(), ArchetypeName(GuildArchetype::Casual));
++        recruitLeaders.emplace_back(leaderPlayer->GetGUID(), ArchetypeName(GuildArchetype::Casual));
 +        return true;
 +    };
 +
@@ -1557,6 +1969,10 @@ index 00000000..79854647
 +
 +    LOG_INFO("playerbots", "[PersonalityGuild] Formation complete: {} raid, {} pvp, {} casual guilds", raidFormed,
 +             pvpFormed, casualFormed);
++
++    // Realm-start experience: send the new guild leaders out to recruit fresh
++    // real players at the starting areas. No-op unless this is a fresh realm.
++    GuildRecruitmentEvent::instance().Begin(recruitLeaders);
 +}
 diff --git a/src/Bot/Factory/PersonalityGuildFactory.h b/src/Bot/Factory/PersonalityGuildFactory.h
 new file mode 100644
@@ -1681,4 +2097,24 @@ index fa8a10de..eb47fb6f 100644
 +    uint32 botAhSellMaxListings;  // cap on concurrent listings per bot
      int32 enableRandomBotTrading;
      uint32 tweakValue;  // Debugging config
+ 
+diff --git a/src/Script/Playerbots.cpp b/src/Script/Playerbots.cpp
+index e9abd5b7..59f1f5c6 100644
+--- a/src/Script/Playerbots.cpp
++++ b/src/Script/Playerbots.cpp
+@@ -33,6 +33,7 @@
+ #include "PlayerbotCommandScript.h"
+ #include "cmath"
+ #include "BattleGroundTactics.h"
++#include "GuildRecruitmentEvent.h"
+ 
+ class PlayerbotsDatabaseScript : public DatabaseScript
+ {
+@@ -380,6 +381,7 @@ public:
+     {
+         PlayerbotWorldThreadProcessor::instance().Update(diff);
+         sRandomPlayerbotMgr.UpdateAI(diff);  // World thread only
++        GuildRecruitmentEvent::instance().Update(diff);  // World thread only
+     }
+ };
  

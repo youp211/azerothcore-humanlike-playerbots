@@ -318,3 +318,54 @@ subwords with clean metrics.
 - Sentiment guids are *counters*, not raw 64-bit GUIDs.
 - Killing a ROCm training run mid-step: verify the next run's *outputs*, not
   its loss curve.
+
+---
+
+## 10. Group-join requests & addressee disambiguation (2026-07-03)
+
+Ask a bot to help/party in **proximity chat** (say/yell/whisper, within say
+range — channel messages deliberately can't trigger invites from bots you
+can't see) and it acts: `EvaluateGroupRequest`
+(`mod-ollama-chat_groupjoin.cpp`) detects group-request intent (keyword
+heuristic), rolls a personality base chance (LFG_SPAMMER 95 … ELITE_ARENA_PVPER
+5, playstyle defaults otherwise) + `GroupJoinSentimentBonus` (+20 at sentiment
+≥ 0.6), sends a **real group invite** on success, and tells the model what it
+just did so the reply matches the action. Declines are phrased in-voice.
+
+**Ambiguity**: 2+ candidate bots and none named → each asks "who, me?" in its
+own voice with a randomized 0.8–5 s stagger; naming a bot (or a bare
+affirmative like "yeah you") within 60 s resolves the pending ask to that bot.
+Conf: `OllamaChat.EnableGroupJoin`, `GroupJoinSentimentBonus`. Logs:
+`[GroupJoin]`.
+
+## 11. Channel conversation system (2026-07-03)
+
+Public channels (General/Trade) are conversation spaces, not random-banter
+firehoses (`mod-ollama-chat_channels.cpp`):
+
+- **Session memory**: last 30 lines per channel kept in RAM; a bot replying in
+  a channel gets the recent stream as prompt context, so channel talk is
+  conversation-aware.
+- **Personality gating**: most personalities barely use General (8% scale —
+  they're the quest-with-you-in-person types); the channel-native set
+  (LFG_SPAMMER 90, GUILD_RECRUITER 85, traders 60-70, DRAMA_QUEEN 50 …) stays
+  active **when the message is relevant** (group/dungeon/trade/guild keywords
+  or being named). Irrelevant chatter gets near-zero bot response.
+- **Throttles**: one channel line per bot per `ChannelReplyCooldownSec` (90).
+- **Relevant announcements**: a periodic announcer lets channel-native bots
+  post level-appropriate dungeon LFG, real-item WTS lines, or recruitment for
+  their actual guild — a few per hour, only when real players share the
+  faction+zone. Conf: `OllamaChat.EnableChannelOverhaul`,
+  `ChannelReplyCooldownSec`, `ChannelAnnounceIntervalSec`,
+  `ChannelAnnounceChance`. Logs: `[Channel]`.
+
+## 12. Realm-start guild recruitment (2026-07-03)
+
+After personality guilds form on a fresh world, each leader teleports to **its
+own race's starting area** (from `playercreateinfo`), pitches its guild
+in-voice every 60–90 s for `AiPlayerbot.GuildRecruitMinutes` (15), and sends
+guild invites to nearby unguilded real players under level 10 (once per
+player, ≤10 per leader), then teleports back to its old life
+(`mod-playerbots/src/Bot/Factory/GuildRecruitmentEvent.cpp`). Accept one and
+you level inside that leader's guild from day one. Conf:
+`AiPlayerbot.GuildRecruit{Enabled,Minutes,InviteRange}`. Logs: `[GuildRecruit]`.

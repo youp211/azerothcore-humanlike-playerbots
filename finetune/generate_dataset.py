@@ -733,6 +733,56 @@ def gen_guild_name_example(rng):
     name = rng.choice(GUILD_NAME_BANKS.get(pkey, GUILD_NAME_GENERIC))
     return {"messages": [{"role": "user", "content": prompt}, {"role": "assistant", "content": name}]}
 
+
+# ---------------------------------------------------------------------------
+# Situation-line examples - user turn mirrors OllamaChat_SpeakSituation in
+# mod-ollama-chat_handler.cpp exactly. These are the one-liners bots speak
+# when gameplay code DOES something (invites, trades, recruitment pitches).
+# ---------------------------------------------------------------------------
+
+SITUATION_TEMPLATE = ("You're a Wrath-era WoW player. Name: {bot_name}, a level {bot_level} {bot_class}. "
+                      "MAKE SURE YOU RESPOND USING YOUR PERSONALITY, WHICH IS: {pkey}: {ptext}. "
+                      "Situation: {situation} (speaking to {target}). Say one short in-character line about it, "
+                      "under 15 words. No narration, no quotes, just the line.")
+
+# (situation text, generic reply bank). Personality flavor comes from the
+# persona block; banks give the model the right REGISTER per situation.
+SITUATIONS = [
+    ("you just sent them a group invite - tell them it's on the way",
+     ["invite sent, accept it", "sent you an inv, lets go", "check your screen, invite is up"]),
+    ("they asked you to group up but you don't feel like it - decline in your own words, true to your personality",
+     ["nah im good solo rn", "gonna pass, mid grind", "not today man"]),
+    ("there are several of you nearby and you're not sure they meant you - ask briefly, in your own way, whether they mean you",
+     ["you talking to me?", "me or him lol", "who, me?"]),
+    ("you put your gear in the trade window; it costs them silver, ask them to add the money",
+     ["moneys in the window and its yours", "just add the silver and we're done", "pay up and its yours"]),
+    ("you just gave them a piece of gear for free in a trade",
+     ["there you go, use it well", "all yours man", "wear it in good health"]),
+    ("you just sold them a piece of gear in a trade, they paid up",
+     ["pleasure doing business", "good trade man", "come back anytime"]),
+    ("you just finished a quest together and mailed them a thank-you reward",
+     ["sent you a little something, check your mail", "mailed you a thanks for the help", "check your mailbox, you earned it"]),
+    ("you're recruiting new members for your raid guild at the starting area - make a short friendly recruitment pitch to the new players around",
+     ["new guild recruiting, we clear content, whisper me", "building a raid team from the ground up, join early", "recruiting for progression, all welcome to apply"]),
+    ("you're recruiting new members for your pvp guild at the starting area - make a short friendly recruitment pitch to the new players around",
+     ["pvp guild recruiting, we fight everything", "join up if you like killing people", "recruiting future gladiators, start now"]),
+    ("you're recruiting new members for your casual guild at the starting area - make a short friendly recruitment pitch to the new players around",
+     ["friendly guild recruiting, no pressure just fun", "new player guild, everyone welcome", "come level with us, we help each other"]),
+    ("you just sent them a guild invite - tell them what your guild is about, briefly",
+     ["sent you a guild inv, we're a chill bunch", "invite is up, we run stuff together every night", "join us, we take care of our own"]),
+]
+
+def gen_situation_example(rng):
+    pkey = rng.choice(list(P))
+    ptext, style = P[pkey]
+    bot = make_actor(rng)
+    situation, bank = rng.choice(SITUATIONS)
+    target = rng.choice(NAMES)
+    prompt = SITUATION_TEMPLATE.format(bot_name=bot["name"], bot_level=bot["level"], bot_class=bot["class"],
+                                       pkey=pkey, ptext=ptext, situation=situation, target=target)
+    reply = apply_style(rng.choice(bank), style, rng)
+    return {"messages": [{"role": "user", "content": prompt}, {"role": "assistant", "content": reply}]}
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=5000)
@@ -747,7 +797,9 @@ def main():
     seen, rows = set(), []
     while len(rows) < args.n:
         r = rng.random()
-        ex = gen_guild_name_example(rng) if r < 0.03 else (gen_random_chatter_example(rng) if r < 0.28 else gen_chat_example(rng))
+        ex = (gen_guild_name_example(rng) if r < 0.03 else
+              gen_situation_example(rng) if r < 0.10 else
+              gen_random_chatter_example(rng) if r < 0.33 else gen_chat_example(rng))
         key = (ex["messages"][0]["content"][:120], ex["messages"][1]["content"])
         if key in seen:
             continue

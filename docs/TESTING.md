@@ -108,3 +108,24 @@ JOIN acore_characters.item_instance ii ON ii.guid = ah.itemguid LIMIT 20;
 - Arena coordination (needs 70+; teams auto-form, rated queues enabled)
 - AH buy-side (mod-ah-bot): needs one character created on the AHBOT account,
   then set `AuctionHouseBot.EnableBuyer = 1` in mod_ahbot.conf and restart.
+
+## 11. Group-join + who-me (proximity only)
+- [ ] Lone bot, `/say can you help me? party up?` → invite lands (or in-voice
+      decline). `[GroupJoin]` logs show the rolled chance
+- [ ] 2+ bots, ask without naming → staggered "who me?" in different voices;
+      answer with a name or "yeah you" → that bot proceeds
+- [ ] Channel messages must NOT produce invites from distant bots
+
+## 12. Channels
+- [ ] General is quiet-but-alive: mostly LFG/trade/recruitment lines from the
+      personalities that would post them; generic chatter gets few bot replies
+- [ ] Ask "anyone want to run Deadmines?" in General → relevant bots bite and
+      the conversation references earlier channel lines
+- [ ] `[Channel]` announces appear a few per hour with real players around
+
+## 13. Realm-start recruitment (fresh world only)
+- [ ] Within ~2 min of full bot login, guild leaders appear at racial starting
+      areas and pitch every minute or so (`[GuildRecruit]` logs)
+- [ ] A fresh sub-10 unguilded character gets a guild invite popup + in-voice
+      whisper; accepting joins the themed guild
+- [ ] After 15 min leaders vanish back to their normal lives

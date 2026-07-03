@@ -149,6 +149,653 @@ index 058007f..e9739a0 100644
  
  // Declare the global QueryManager variable.
  extern QueryManager g_queryManager;
+diff --git a/src/mod-ollama-chat_channels.cpp b/src/mod-ollama-chat_channels.cpp
+new file mode 100644
+index 0000000..4ac872a
+--- /dev/null
++++ b/src/mod-ollama-chat_channels.cpp
+@@ -0,0 +1,575 @@
++// mod-ollama-chat_channels.cpp
++//
++// Public-channel (General / Trade / ...) behavior overhaul. See the header for
++// the design rationale. This translation unit owns:
++//   * a RAM-only per-channel session log (last 30 lines),
++//   * personality-driven channel talkativeness + relevance gating for replies,
++//   * a per-bot channel cooldown shared by replies and announcements,
++//   * a periodic announcer that posts RELEVANT lines (LFG for the bot's level,
++//     guild recruitment, WTS/price-checks) mapped to personality.
++//
++// Everything except the tiny hook surface in the header is local to this file.
++// Config is read directly via sConfigMgr (no globals added to the config unit).
++
++#include "mod-ollama-chat_channels.h"
++
++#include "mod-ollama-chat_api.h"
++#include "mod-ollama-chat_config.h"
++#include "mod-ollama-chat_handler.h"
++#include "mod-ollama-chat_personality.h"
++
++#include "Bag.h"
++#include "Common.h"
++#include "Config.h"
++#include "Guild.h"
++#include "Item.h"
++#include "ItemTemplate.h"
++#include "Log.h"
++#include "ObjectAccessor.h"
++#include "ObjectGuid.h"
++#include "Player.h"
++#include "Random.h"
++#include "ScriptMgr.h"
++#include "SharedDefines.h"
++#include "Timer.h"
++
++#include "PlayerbotAI.h"
++#include "PlayerbotMgr.h"
++
++#include <algorithm>
++#include <cctype>
++#include <deque>
++#include <fmt/core.h>
++#include <future>
++#include <mutex>
++#include <string>
++#include <thread>
++#include <unordered_map>
++#include <unordered_set>
++#include <vector>
++
++namespace
++{
++    // --- Config accessors (direct reads; defaults keep the feature on) --------
++    bool CfgEnabled()
++    {
++        return sConfigMgr->GetOption<bool>("OllamaChat.EnableChannelOverhaul", true);
++    }
++    uint32_t CfgReplyCooldownSec()
++    {
++        return sConfigMgr->GetOption<uint32_t>("OllamaChat.ChannelReplyCooldownSec", 90);
++    }
++    uint32_t CfgAnnounceIntervalSec()
++    {
++        return sConfigMgr->GetOption<uint32_t>("OllamaChat.ChannelAnnounceIntervalSec", 180);
++    }
++    float CfgAnnounceChance()
++    {
++        return sConfigMgr->GetOption<float>("OllamaChat.ChannelAnnounceChance", 2.0f);
++    }
++
++    // --- Small string helpers -------------------------------------------------
++    std::string ToLower(std::string const& in)
++    {
++        std::string out = in;
++        for (char& c : out)
++            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
++        return out;
++    }
++
++    // Whole-word membership so "us" does not match "focus" and "ah" does not
++    // match "yeah". Multi-word phrases fall back to a plain substring find.
++    bool ContainsWord(std::string const& lowerMsg, std::string const& needle)
++    {
++        if (needle.empty())
++            return false;
++        if (needle.find(' ') != std::string::npos)
++            return lowerMsg.find(needle) != std::string::npos;
++
++        size_t pos = 0;
++        while ((pos = lowerMsg.find(needle, pos)) != std::string::npos)
++        {
++            bool validStart = (pos == 0 || !std::isalnum(static_cast<unsigned char>(lowerMsg[pos - 1])));
++            size_t endPos = pos + needle.size();
++            bool validEnd = (endPos >= lowerMsg.size() || !std::isalnum(static_cast<unsigned char>(lowerMsg[endPos])));
++            if (validStart && validEnd)
++                return true;
++            ++pos;
++        }
++        return false;
++    }
++
++    bool ContainsAny(std::string const& lowerMsg, std::vector<char const*> const& words)
++    {
++        for (char const* w : words)
++            if (ContainsWord(lowerMsg, w))
++                return true;
++        return false;
++    }
++
++    // --- Personality tables ---------------------------------------------------
++    // Channel talkativeness (0..100). Only the personalities who would actually
++    // hang out in a public channel get a high value; everyone else is 8 - most
++    // bots barely use General because their personalities quest with you in
++    // person.
++    float TalkChanceForKey(std::string const& personality)
++    {
++        static std::unordered_map<std::string, float> const kByPersonality = {
++            { "LFG_SPAMMER",         90.0f }, { "GUILD_RECRUITER",     85.0f },
++            { "TRADE_COMEDIAN",      70.0f }, { "TRADER",              70.0f },
++            { "GOBLIN_MERCHANT",     65.0f }, { "GOLD_FARMER",         60.0f },
++            { "DRAMA_QUEEN",         50.0f }, { "UNHINGED_TROLL",      45.0f },
++            { "CONSPIRACY_THEORIST", 40.0f }
++        };
++        auto it = kByPersonality.find(personality);
++        return it != kByPersonality.end() ? it->second : 8.0f;
++    }
++
++    // The chatty set = anyone with an above-default channel talkativeness.
++    bool IsHighChatter(std::string const& personality)
++    {
++        return TalkChanceForKey(personality) > 8.0f;
++    }
++
++    bool IsTrader(std::string const& personality)
++    {
++        static std::unordered_set<std::string> const kTraders = {
++            "TRADER", "TRADE_COMEDIAN", "GOBLIN_MERCHANT", "GOLD_FARMER"
++        };
++        return kTraders.count(personality) != 0;
++    }
++
++    bool IsRecruiter(std::string const& personality)
++    {
++        return personality == "GUILD_RECRUITER";
++    }
++
++    // Guild leaders/officers also legitimately recruit in channels.
++    bool IsGuildOfficer(Player* bot)
++    {
++        return bot && bot->GetGuildId() != 0 && bot->GetRank() <= GR_OFFICER;
++    }
++
++    // --- Relevance keyword sets ----------------------------------------------
++    std::vector<char const*> const kGroupKeywords = {
++        "lfg", "looking for group", "group", "dungeon", "instance", "quest",
++        "heroic", "tank", "healer", "dps", "run", "carry", "boost"
++    };
++    std::vector<char const*> const kTradeKeywords = {
++        "wts", "wtb", "wtt", "price", "pricecheck", "selling", "buying",
++        "auction", "trade", "mats", "enchant"
++    };
++    std::vector<char const*> const kGuildKeywords = {
++        "guild", "recruit", "recruiting", "guildless"
++    };
++
++    bool MessageNamesBot(Player* bot, std::string const& lowerMsg)
++    {
++        std::string const name = ToLower(bot->GetName());
++        return !name.empty() && ContainsWord(lowerMsg, name);
++    }
++
++    // --- Channel session log (RAM only, last 30 lines per channel) -----------
++    struct ChannelLine
++    {
++        std::string speaker;
++        std::string message;
++    };
++
++    constexpr size_t kMaxLoggedLines = 30;
++    std::mutex g_channelLogMutex;
++    std::unordered_map<uint32_t, std::deque<ChannelLine>> g_channelLog;
++
++    // --- Per-bot channel cooldown (replies AND announcements) ----------------
++    std::mutex g_cooldownMutex;
++    std::unordered_map<uint64_t, uint32_t> g_lastChannelReply; // low guid -> getMSTime()
++
++    bool OnCooldown(Player* bot)
++    {
++        if (!bot)
++            return true;
++        uint32_t cd = CfgReplyCooldownSec();
++        if (cd == 0)
++            return false;
++        std::lock_guard<std::mutex> lock(g_cooldownMutex);
++        auto it = g_lastChannelReply.find(bot->GetGUID().GetRawValue());
++        if (it == g_lastChannelReply.end())
++            return false;
++        return getMSTimeDiff(it->second, getMSTime()) < cd * IN_MILLISECONDS;
++    }
++
++    // --- WotLK-era dungeon brackets (from finetune/generate_dataset.py) -------
++    struct DungeonBracket { uint32 lo; uint32 hi; char const* name; };
++    DungeonBracket const kDungeons[] = {
++        { 13, 18, "Deadmines" },       { 17, 24, "Wailing Caverns" },
++        { 22, 30, "Scarlet Monastery"},{ 29, 38, "Uldaman" },
++        { 37, 46, "Zul'Farrak" },      { 44, 54, "Sunken Temple" },
++        { 55, 60, "Stratholme" },      { 60, 62, "Ramparts" },
++        { 67, 70, "Shattered Halls" }, { 70, 73, "Utgarde Keep" },
++        { 74, 76, "Drak'Tharon Keep"}, { 77, 80, "Halls of Lightning" }
++    };
++
++    std::string PickDungeonForLevel(uint32 level)
++    {
++        std::vector<char const*> matches;
++        for (auto const& d : kDungeons)
++            if (d.lo <= level + 3 && d.hi + 3 >= level)
++                matches.push_back(d.name);
++        if (matches.empty())
++            return "";
++        return matches[urand(0, matches.size() - 1)];
++    }
++
++    // A spare, non-soulbound, uncommon+ armor/weapon/trade-good the bot could
++    // plausibly hawk. Mirrors the bag-scan in GenerateGearContext.
++    std::string PickSellableItemName(Player* bot)
++    {
++        Item* best = nullptr;
++        auto consider = [&](Item* item)
++        {
++            if (!item || item->IsSoulBound())
++                return;
++            ItemTemplate const* proto = item->GetTemplate();
++            if (!proto)
++                return;
++            if (proto->Quality < ITEM_QUALITY_UNCOMMON || proto->Quality > ITEM_QUALITY_EPIC)
++                return;
++            if (proto->Class != ITEM_CLASS_ARMOR && proto->Class != ITEM_CLASS_WEAPON &&
++                proto->Class != ITEM_CLASS_TRADE_GOODS)
++                return;
++            if (proto->Bonding == BIND_QUEST_ITEM || proto->HasFlag(ITEM_FLAG_CONJURED))
++                return;
++            if (!best || proto->ItemLevel > best->GetTemplate()->ItemLevel)
++                best = item;
++        };
++
++        for (uint8 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
++            consider(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i));
++        for (uint8 b = INVENTORY_SLOT_BAG_START; b < INVENTORY_SLOT_BAG_END; ++b)
++            if (Bag* bag = bot->GetBagByPos(b))
++                for (uint32 s = 0; s < bag->GetBagSize(); ++s)
++                    consider(bag->GetItemByPos(s));
++
++        return best ? std::string(best->GetTemplate()->Name1) : std::string();
++    }
++
++    // --- Announcement intent --------------------------------------------------
++    // Order matters: personality-specific intents win over the guild-officer
++    // fallback. Personalities in the chatty set with no channel-appropriate
++    // intent (drama/troll/conspiracy) return None - they still REPLY when a
++    // message is relevant, they just do not spam announcements.
++    struct AnnounceIntent
++    {
++        char const* label = nullptr;  // for the log line; nullptr => do not announce
++        std::string text;             // directive appended to the persona prompt
++    };
++
++    AnnounceIntent PickAnnounceIntent(Player* bot, std::string const& personality)
++    {
++        AnnounceIntent intent;
++
++        if (personality == "LFG_SPAMMER")
++        {
++            std::string dungeon = PickDungeonForLevel(bot->GetLevel());
++            if (dungeon.empty())
++                return intent;
++            intent.label = "LFG";
++            intent.text = fmt::format(
++                "(You want to find a group for {}. Post a short LFG line - your level ({}), "
++                "your role, and the dungeon - like a real player spamming LookingForGroup. One line.)",
++                dungeon, bot->GetLevel());
++            return intent;
++        }
++
++        if (IsTrader(personality))
++        {
++            std::string item = PickSellableItemName(bot);
++            if (item.empty())
++                return intent;
++            intent.label = "Trade";
++            intent.text = fmt::format(
++                "(You are hawking your wares. Post one short WTS / price-check line about your {} "
++                "in your own voice, like a Trade-channel regular. One line.)",
++                item);
++            return intent;
++        }
++
++        if (IsRecruiter(personality) || IsGuildOfficer(bot))
++        {
++            Guild* guild = bot->GetGuild();
++            if (!guild)
++                return intent;
++            intent.label = "Recruit";
++            intent.text = fmt::format(
++                "(You are recruiting for your guild, <{}>. Post one short, punchy guild-recruitment "
++                "line naming the guild. One line.)",
++                guild->GetName());
++            return intent;
++        }
++
++        return intent;
++    }
++
++    bool RealPlayerInBotGeneral(Player* bot)
++    {
++        for (auto const& pair : ObjectAccessor::GetPlayers())
++        {
++            Player* p = pair.second;
++            if (!p || !p->IsInWorld())
++                continue;
++            if (PlayerbotsMgr::instance().GetPlayerbotAI(p))
++                continue;
++            if (p->GetTeamId() == bot->GetTeamId() && p->GetZoneId() == bot->GetZoneId())
++                return true;
++        }
++        return false;
++    }
++
++    // Build the persona + intent prompt (no dependency on the chat template).
++    std::string BuildAnnouncePrompt(Player* bot, std::string const& personality, AnnounceIntent const& intent)
++    {
++        PlayerbotAI* botAI = PlayerbotsMgr::instance().GetPlayerbotAI(bot);
++        std::string botClass = (botAI && botAI->GetChatHelper())
++                                   ? botAI->GetChatHelper()->FormatClass(bot->getClass())
++                                   : "adventurer";
++        std::string faction = (bot->GetTeamId() == TEAM_ALLIANCE ? "Alliance" : "Horde");
++        std::string personalityPrompt = GetPersonalityPromptAddition(personality);
++
++        return fmt::format(
++            "You're a Wrath-era WoW player. Name: {}, a level {} {} ({}). "
++            "Your personality is {}: {}. {} "
++            "Write ONE short in-character public-channel line (max ~20 words), plain text, "
++            "no quotes, no narration, no emotes.",
++            bot->GetName(), bot->GetLevel(), botClass, faction,
++            personality, personalityPrompt, intent.text);
++    }
++}  // namespace
++
++// ===========================================================================
++// Public surface (declared in the header, called from the handler).
++// ===========================================================================
++
++void RecordChannelLine(uint32_t channelId, std::string const& speaker, std::string const& msg)
++{
++    if (channelId == 0 || speaker.empty() || msg.empty())
++        return;
++
++    std::lock_guard<std::mutex> lock(g_channelLogMutex);
++    auto& log = g_channelLog[channelId];
++    log.push_back(ChannelLine{ speaker, msg });
++    while (log.size() > kMaxLoggedLines)
++        log.pop_front();
++}
++
++std::string BuildChannelHistory(uint32_t channelId, uint32_t maxLines)
++{
++    if (channelId == 0 || maxLines == 0)
++        return "";
++
++    std::lock_guard<std::mutex> lock(g_channelLogMutex);
++    auto it = g_channelLog.find(channelId);
++    if (it == g_channelLog.end() || it->second.empty())
++        return "";
++
++    auto const& log = it->second;
++    size_t start = log.size() > maxLines ? log.size() - maxLines : 0;
++
++    std::string out = "Recent channel conversation:\n";
++    for (size_t i = start; i < log.size(); ++i)
++    {
++        std::string line = log[i].message;
++        if (line.size() > 200)  // keep the prompt bounded
++            line.resize(200);
++        out += log[i].speaker + ": " + line + "\n";
++    }
++    return out;
++}
++
++float ChannelTalkChanceFor(Player* bot)
++{
++    if (!bot)
++        return 0.0f;
++    return TalkChanceForKey(GetBotPersonality(bot));
++}
++
++bool ChannelMessageRelevantTo(Player* bot, std::string const& msg)
++{
++    if (!bot)
++        return false;
++
++    std::string const lower = ToLower(msg);
++
++    // Directly addressed -> always relevant.
++    if (MessageNamesBot(bot, lower))
++        return true;
++
++    // Group/dungeon/LFG topics are relevant to any channel-active bot; the low
++    // default talkativeness keeps non-channel personalities quiet regardless.
++    if (ContainsAny(lower, kGroupKeywords))
++        return true;
++
++    std::string const personality = GetBotPersonality(bot);
++    if (IsTrader(personality) && ContainsAny(lower, kTradeKeywords))
++        return true;
++    if ((IsRecruiter(personality) || IsGuildOfficer(bot)) && ContainsAny(lower, kGuildKeywords))
++        return true;
++
++    return false;
++}
++
++bool ShouldBotReplyInChannel(Player* bot, std::string const& msg, uint32_t& effChance)
++{
++    if (!CfgEnabled())
++        return true;  // overhaul off -> legacy behavior, effChance untouched
++    if (!bot)
++        return false;
++
++    // Hard throttle: one channel line per bot per cooldown.
++    if (OnCooldown(bot))
++    {
++        if (g_DebugEnabled)
++            LOG_INFO("server.loading", "[Channel] {} suppressed (on cooldown)", bot->GetName());
++        return false;
++    }
++
++    std::string const personality = GetBotPersonality(bot);
++
++    if (!ChannelMessageRelevantTo(bot, msg))
++    {
++        // Generic chatter: only the chatty set bites, and rarely.
++        if (!IsHighChatter(personality))
++        {
++            if (g_DebugEnabled)
++                LOG_INFO("server.loading", "[Channel] {} suppressed (irrelevant / not a channel personality)",
++                         bot->GetName());
++            return false;
++        }
++        effChance = 10;  // small flat chance for banter from the chatty set
++        return true;
++    }
++
++    // Relevant: scale the base channel chance by personality talkativeness.
++    float talk = TalkChanceForKey(personality);
++    effChance = std::min<uint32_t>(100u, static_cast<uint32_t>(effChance * (talk / 100.0f) + 0.5f));
++    return true;
++}
++
++void MarkChannelReply(Player* bot)
++{
++    if (!bot)
++        return;
++    std::lock_guard<std::mutex> lock(g_cooldownMutex);
++    g_lastChannelReply[bot->GetGUID().GetRawValue()] = getMSTime();
++}
++
++// ===========================================================================
++// Periodic announcer: posts relevant channel lines mapped to personality.
++// ===========================================================================
++class OllamaChatChannelAnnouncer : public WorldScript
++{
++public:
++    OllamaChatChannelAnnouncer() : WorldScript("OllamaChatChannelAnnouncer") { }
++
++    void OnUpdate(uint32 diff) override
++    {
++        if (!g_Enable || !CfgEnabled())
++            return;
++
++        uint32 intervalMs = CfgAnnounceIntervalSec() * IN_MILLISECONDS;
++        if (intervalMs == 0)
++            return;
++
++        if (m_timer > diff)
++        {
++            m_timer -= diff;
++            return;
++        }
++        m_timer = intervalMs;
++        RunTick();
++    }
++
++private:
++    uint32 m_timer = 0;
++
++    void RunTick()
++    {
++        float chance = CfgAnnounceChance();
++        if (chance <= 0.0f)
++            return;
++
++        for (auto const& itr : ObjectAccessor::GetPlayers())
++        {
++            Player* bot = itr.second;
++            if (!bot || !bot->IsInWorld() || bot->IsBeingTeleported())
++                continue;
++
++            PlayerbotAI* ai = PlayerbotsMgr::instance().GetPlayerbotAI(bot);
++            if (!ai || !ai->IsBotAI())
++                continue;
++
++            if (OnCooldown(bot))
++                continue;
++
++            std::string personality = GetBotPersonality(bot);
++            AnnounceIntent intent = PickAnnounceIntent(bot, personality);
++            if (!intent.label)
++                continue;  // no channel-appropriate announcement for this bot
++
++            // Do not talk to an empty local General.
++            if (!RealPlayerInBotGeneral(bot))
++                continue;
++
++            if (!roll_chance_f(chance))
++                continue;
++
++            std::string prompt = BuildAnnouncePrompt(bot, personality, intent);
++            uint64_t botGuid = bot->GetGUID().GetRawValue();
++            OllamaQueryOptions queryOpts = GetPersonalityQueryOptions(bot);
++            std::string label = intent.label;
++
++            std::thread([botGuid, prompt, queryOpts, label]()
++            {
++                try
++                {
++                    std::future<std::string> fut = SubmitQuery(prompt, queryOpts);
++                    if (!fut.valid())
++                        return;
++                    std::string response = fut.get();
++                    if (response.empty())
++                        return;
++
++                    Player* botPtr = ObjectAccessor::FindPlayer(ObjectGuid(botGuid));
++                    if (!botPtr)
++                        return;
++                    PlayerbotAI* botAI = PlayerbotsMgr::instance().GetPlayerbotAI(botPtr);
++                    if (!botAI)
++                        return;
++
++                    // Deliver to General (the channel the bot is actually in) and
++                    // route it back through the normal path so it lands in the
++                    // channel session log and can draw relevant replies.
++                    if (!botAI->SayToChannel(response, ChatChannelId::GENERAL))
++                    {
++                        if (g_DebugEnabled)
++                            LOG_INFO("server.loading", "[Channel] {} announce failed (not in a General channel)",
++                                     botPtr->GetName());
++                        return;
++                    }
++
++                    MarkChannelReply(botPtr);
++                    LOG_INFO("server.loading", "[Channel] {} announces in {} ({})",
++                             botPtr->GetName(), "General", label);
++                    ProcessBotChatMessage(botPtr, response, SRC_GENERAL_LOCAL, nullptr);
++                }
++                catch (...)
++                {
++                }
++            }).detach();
++        }
++    }
++};
++
++void AddSC_mod_ollama_chat_channels()
++{
++    new OllamaChatChannelAnnouncer();
++}
+diff --git a/src/mod-ollama-chat_channels.h b/src/mod-ollama-chat_channels.h
+new file mode 100644
+index 0000000..7c76aac
+--- /dev/null
++++ b/src/mod-ollama-chat_channels.h
+@@ -0,0 +1,60 @@
++#ifndef MOD_OLLAMA_CHAT_CHANNELS_H
++#define MOD_OLLAMA_CHAT_CHANNELS_H
++
++// mod-ollama-chat_channels.cpp/.h
++//
++// Public-channel (General / Trade / LookingForGroup / ...) behavior overhaul.
++// Channels should host group-up asks, trade, guild recruitment and real
++// conversation - not per-message banter. Most personalities stay quiet in
++// General (they quest with you in person); only the personalities who would
++// actually use a public channel (LFG spammers, guild recruiters, traders,
++// dungeon advertisers) speak there, and even they are throttled hard and only
++// on RELEVANT messages. Participating bots are given the channel's recent
++// conversation as lightweight session memory.
++//
++// All of the heavy lifting lives in the .cpp; mod-ollama-chat_handler.cpp calls
++// only the small surface declared here (plus main.cpp registers the announcer).
++
++#include <cstdint>
++#include <string>
++
++class Player;
++
++// --- Channel session log (RAM only; no DB) ------------------------------------
++// Record every channel line that reaches the module (players AND bots - bot
++// replies re-enter ProcessChat via ProcessBotChatMessage, so a single hook at
++// the top of ProcessChat captures both). Bounded to the last 30 lines per
++// channel id.
++void RecordChannelLine(uint32_t channelId, std::string const& speaker, std::string const& msg);
++
++// Build "Recent channel conversation:\n<name>: <msg>\n..." for the last
++// maxLines lines of a channel, or "" if the channel has no history. Injected
++// into a replying bot's prompt as session memory.
++std::string BuildChannelHistory(uint32_t channelId, uint32_t maxLines = 10);
++
++// --- Reply gating -------------------------------------------------------------
++// Per-personality channel talkativeness (0..100). High for the personalities
++// that would use public channels; 8 by default for everyone else.
++float ChannelTalkChanceFor(Player* bot);
++
++// True when a channel message is relevant to this specific bot: group/dungeon/
++// lfg/quest keywords (any channel-active bot), trade keywords (trader set),
++// guild-recruit keywords (recruiter set / guild officers), or the bot's name.
++bool ChannelMessageRelevantTo(Player* bot, std::string const& msg);
++
++// Single gate used by the handler's channel reply roll. Returns false to skip
++// the bot entirely (off-cooldown / irrelevant / personality won't talk). On
++// return true, effChance has been scaled in place by the personality's channel
++// talkativeness (or set to a small flat chance for generic chatter from the
++// chatty set). When the overhaul is disabled this returns true and leaves
++// effChance untouched (legacy behavior).
++bool ShouldBotReplyInChannel(Player* bot, std::string const& msg, uint32_t& effChance);
++
++// Mark that a bot just sent a channel line (starts its per-bot cooldown).
++// Called at the actual send site for replies; the announcer marks itself.
++void MarkChannelReply(Player* bot);
++
++// Registration entry point (called from Addmod_ollama_chatScripts).
++void AddSC_mod_ollama_chat_channels();
++
++#endif // MOD_OLLAMA_CHAT_CHANNELS_H
 diff --git a/src/mod-ollama-chat_config.cpp b/src/mod-ollama-chat_config.cpp
 index 8bc1b1d..d9eaa6f 100644
 --- a/src/mod-ollama-chat_config.cpp
@@ -860,7 +1507,7 @@ index 0000000..65a0196
 +
 +#endif // MOD_OLLAMA_CHAT_GROUPJOIN_H
 diff --git a/src/mod-ollama-chat_handler.cpp b/src/mod-ollama-chat_handler.cpp
-index cc89b9f..4c94c8e 100644
+index cc89b9f..689ded0 100644
 --- a/src/mod-ollama-chat_handler.cpp
 +++ b/src/mod-ollama-chat_handler.cpp
 @@ -12,9 +12,15 @@
@@ -879,17 +1526,18 @@ index cc89b9f..4c94c8e 100644
  #include <fmt/core.h>
  #include <nlohmann/json.hpp>
  #include <thread>
-@@ -30,7 +36,9 @@
+@@ -30,7 +36,10 @@
  #include "mod-ollama-chat_config.h"
  #include "mod-ollama-chat-utilities.h"
  #include "mod-ollama-chat_sentiment.h"
 +#include "mod-ollama-chat_memory.h"
  #include "mod-ollama-chat_rag.h"
 +#include "mod-ollama-chat_groupjoin.h"
++#include "mod-ollama-chat_channels.h"
  #include <iomanip>
  #include "SpellMgr.h"
  #include "SpellInfo.h"
-@@ -52,7 +60,8 @@
+@@ -52,7 +61,8 @@
  // Forward declarations for internal helper functions.
  static bool IsBotEligibleForChatChannelLocal(Player* bot, Player* player,
                                               ChatChannelSourceLocal source, Channel* channel = nullptr, Player* receiver = nullptr);
@@ -899,7 +1547,7 @@ index cc89b9f..4c94c8e 100644
  
  // Helper function to format class name for any player
  static std::string FormatPlayerClass(uint8_t classId)
-@@ -286,8 +295,10 @@ void SaveBotConversationHistoryToDB()
+@@ -286,8 +296,10 @@ void SaveBotConversationHistoryToDB()
      }
  
      // Cleanup: keep only the N most recent entries per bot/player pair
@@ -911,7 +1559,7 @@ index cc89b9f..4c94c8e 100644
              SELECT
                  bot_guid,
                  player_guid,
-@@ -297,13 +308,11 @@ void SaveBotConversationHistoryToDB()
+@@ -297,13 +309,11 @@ void SaveBotConversationHistoryToDB()
                      ORDER BY timestamp DESC
                  ) as rn
              FROM mod_ollama_chat_history
@@ -930,12 +1578,36 @@ index cc89b9f..4c94c8e 100644
      )SQL";
      CharacterDatabase.Execute(SafeFormat(cleanupQuery, g_MaxConversationHistory));
  }
-@@ -1336,18 +1345,20 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
+@@ -864,7 +874,14 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
+         }
+         return;
+     }
+-    
++
++    // Public-channel session log: record every General/Trade/... line that
++    // reaches the module - players AND bots, since bot replies re-enter here via
++    // ProcessBotChatMessage - so participating bots can be given recent channel
++    // context. RAM-only; see mod-ollama-chat_channels.cpp.
++    if (sourceLocal == SRC_GENERAL_LOCAL && channelId != 0)
++        RecordChannelLine(channelId, player->GetName(), msg);
++
+     if ((sourceLocal == SRC_SAY_LOCAL || sourceLocal == SRC_YELL_LOCAL) && g_DisableForSayYell)
+     {
+         if (g_DebugEnabled)
+@@ -1336,18 +1353,28 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
                      }
                      continue;
                  }
 +                float personalityMult = GetPersonalityReplyChanceMultiplier(GetBotPersonality(bot));
 +                uint32_t effChance = std::min<uint32_t>(100u, static_cast<uint32_t>(chance * personalityMult + 0.5f));
++
++                // Public-channel overhaul (General/Trade/...): gate by personality
++                // + message relevance + a per-bot cooldown, scaling effChance in
++                // place. Non-channel sources and the disabled case fall through
++                // unchanged. See mod-ollama-chat_channels.cpp.
++                if (sourceLocal == SRC_GENERAL_LOCAL && !ShouldBotReplyInChannel(bot, msg, effChance))
++                    continue;
++
                  uint32_t roll = urand(0, 99);
 -                if (roll < chance)
 +                if (roll < effChance)
@@ -954,7 +1626,7 @@ index cc89b9f..4c94c8e 100644
                  }
              }
          }
-@@ -1408,13 +1419,26 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
+@@ -1408,13 +1435,44 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
          if (bot == nullptr) {
              continue;
          }
@@ -964,14 +1636,32 @@ index cc89b9f..4c94c8e 100644
 +        // world thread (safe for the invite packet, like GenerateGearContext's
 +        // inventory ops below). Only real players get invited. On AskWhoMe the
 +        // gear/give context is suppressed so the bot just asks "who, me?".
++        //
++        // PROXIMITY CHAT ONLY: channel messages (General/Trade/...) reach bots
++        // anywhere in the world - acting on them produced invites from bots
++        // the player couldn't even see. Say/yell/whisper + an in-range check
++        // keep the interaction face-to-face.
++        bool proximityChat = (sourceLocal == SRC_SAY_LOCAL || sourceLocal == SRC_YELL_LOCAL ||
++                              sourceLocal == SRC_WHISPER_LOCAL) &&
++                             bot->IsInMap(player) && bot->GetDistance(player) <= g_SayDistance;
 +        std::string groupJoinContext;
 +        GroupJoinOutcome groupJoinOutcome = GroupJoinOutcome::NotAGroupRequest;
-+        if (!senderIsBot)
++        if (!senderIsBot && proximityChat)
 +            groupJoinOutcome = EvaluateGroupRequest(bot, player, msg,
 +                                                    static_cast<uint32_t>(finalCandidates.size()), groupJoinContext);
 +        bool isWhoMe = (groupJoinOutcome == GroupJoinOutcome::AskWhoMe);
 +
-+        std::string prompt = GenerateBotPrompt(bot, msg, player, groupJoinContext, isWhoMe);
++        // For public channels, hand the bot the recent channel conversation as
++        // lightweight session memory, appended after any group-join directive.
++        std::string promptContext = groupJoinContext;
++        if (sourceLocal == SRC_GENERAL_LOCAL && channel)
++        {
++            std::string channelLog = BuildChannelHistory(channel->GetChannelId());
++            if (!channelLog.empty())
++                promptContext += (promptContext.empty() ? "" : "\n") + channelLog;
++        }
++
++        std::string prompt = GenerateBotPrompt(bot, msg, player, promptContext, isWhoMe);
          uint64_t botGuid = bot->GetGUID().GetRawValue();
 -        
 -        std::thread([botGuid, senderGuid, prompt, sourceLocal, channelId = (channel ? channel->GetChannelId() : 0), channelName = (channel ? channel->GetName() : ""), msg]() {
@@ -985,7 +1675,7 @@ index cc89b9f..4c94c8e 100644
                  if (!responseFuture.valid())
                  {
                      return;
-@@ -1475,7 +1499,21 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
+@@ -1475,7 +1533,21 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
                      senderPtr = ObjectAccessor::FindPlayer(ObjectGuid(senderGuid));
                      if (!senderPtr) return;
                  }
@@ -1008,7 +1698,19 @@ index cc89b9f..4c94c8e 100644
                  // Route the response.
                  if (channelId != 0 && !channelName.empty())
                  {
-@@ -1797,8 +1835,286 @@ static bool IsBotEligibleForChatChannelLocal(Player* bot, Player* player, ChatCh
+@@ -1500,6 +1572,11 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
+                                             botPtr->GetName(), channelName);
+                                 }
+                                 targetChannel->Say(botPtr->GetGUID(), response, LANG_UNIVERSAL);
++                                // Start this bot's per-bot channel cooldown at the
++                                // actual send (channels.cpp). ProcessBotChatMessage
++                                // below re-enters ProcessChat, which logs the line
++                                // into the channel session memory.
++                                MarkChannelReply(botPtr);
+                                 ProcessBotChatMessage(botPtr, response, SRC_GENERAL_LOCAL, targetChannel);
+                                 if(g_DebugEnabled)
+                                 {
+@@ -1797,8 +1874,286 @@ static bool IsBotEligibleForChatChannelLocal(Player* bot, Player* player, ChatCh
      }
  }
  
@@ -1297,7 +1999,7 @@ index cc89b9f..4c94c8e 100644
      if (!bot || !player) {
          return "";
      }
-@@ -1853,6 +2169,7 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
+@@ -1853,6 +2208,7 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
  
      std::string chatHistory         = GetBotHistoryPrompt(botGuid, playerGuid, playerMessage);
      std::string sentimentInfo       = GetSentimentPromptAddition(bot, player);
@@ -1305,7 +2007,7 @@ index cc89b9f..4c94c8e 100644
  
      // Retrieve RAG information if enabled
      std::string ragInfo;
-@@ -1906,7 +2223,9 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
+@@ -1906,7 +2262,9 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
          fmt::arg("player_message", playerMessage),
          fmt::arg("extra_info", extraInfo),
          fmt::arg("chat_history", chatHistory),
@@ -1316,7 +2018,7 @@ index cc89b9f..4c94c8e 100644
      );
  
      // Add RAG information to the prompt if available
-@@ -1919,6 +2238,14 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
+@@ -1919,6 +2277,14 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
          prompt += GenerateBotGameStateSnapshot(bot);
      }
  
@@ -1331,7 +2033,7 @@ index cc89b9f..4c94c8e 100644
      // Debug logging for full prompt including RAG information
      if (g_DebugEnabled && g_DebugShowFullPrompt) {
          LOG_INFO("server.loading", "[Ollama Chat] Full prompt sent to bot {} for player {}: {}", botName, playerName, prompt);
-@@ -1926,3 +2253,58 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
+@@ -1926,3 +2292,58 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
  
      return prompt;
  }
@@ -1412,10 +2114,10 @@ index ec51274..8d24ac5 100644
  };
  
 diff --git a/src/mod-ollama-chat_main.cpp b/src/mod-ollama-chat_main.cpp
-index 9c1a141..13b504e 100644
+index 9c1a141..e9c098a 100644
 --- a/src/mod-ollama-chat_main.cpp
 +++ b/src/mod-ollama-chat_main.cpp
-@@ -23,5 +23,15 @@ void Addmod_ollama_chatScripts()
+@@ -23,5 +23,17 @@ void Addmod_ollama_chatScripts()
      new ChatOnLevelUp();
      new ChatOnAchievement();
      new ChatOnGameObjectUse();
@@ -1430,6 +2132,8 @@ index 9c1a141..13b504e 100644
 +    AddSC_mod_ollama_chat_memory();
 +    void AddSC_mod_ollama_chat_guildnames();
 +    AddSC_mod_ollama_chat_guildnames();
++    void AddSC_mod_ollama_chat_channels();
++    AddSC_mod_ollama_chat_channels();
  }
 diff --git a/src/mod-ollama-chat_personality.cpp b/src/mod-ollama-chat_personality.cpp
 index 34eb2d2..50f1367 100644
