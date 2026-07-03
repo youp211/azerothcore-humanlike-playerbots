@@ -1053,7 +1053,7 @@ index 0000000..bf2332a
 +    new OllamaChatGuildNameWorldScript();
 +}
 diff --git a/src/mod-ollama-chat_handler.cpp b/src/mod-ollama-chat_handler.cpp
-index cc89b9f..e12ee6b 100644
+index cc89b9f..a2aa5df 100644
 --- a/src/mod-ollama-chat_handler.cpp
 +++ b/src/mod-ollama-chat_handler.cpp
 @@ -12,9 +12,15 @@
@@ -1151,7 +1151,7 @@ index cc89b9f..e12ee6b 100644
                  if (!responseFuture.valid())
                  {
                      return;
-@@ -1797,8 +1807,253 @@ static bool IsBotEligibleForChatChannelLocal(Player* bot, Player* player, ChatCh
+@@ -1797,8 +1807,285 @@ static bool IsBotEligibleForChatChannelLocal(Player* bot, Player* player, ChatCh
      }
  }
  
@@ -1219,6 +1219,26 @@ index cc89b9f..e12ee6b 100644
 +    uint32 now = getMSTime();
 +    g_lastGiveByBot[bot->GetGUID().GetRawValue()] = now;
 +    g_lastGiveByPair[{bot->GetGUID().GetRawValue(), player->GetGUID().GetRawValue()}] = now;
++}
++
++// Gear COMMENTARY throttle: the inspect block only enters the prompt
++// occasionally per pair, so bots don't turn every conversation into a gear
++// review ("wanna group?" -> "nice belt"). Give events bypass this - an item
++// actually sent/parked must always be announced.
++static std::mutex g_gearCtxMutex;
++static std::map<std::pair<uint64_t, uint64_t>, uint32> g_lastGearCtxByPair;
++
++static bool GearCommentaryAllowed(Player* bot, Player* player)
++{
++    uint32 cooldownMin = sConfigMgr->GetOption<uint32>("OllamaChat.GearContextCooldownMin", 10);
++    std::lock_guard<std::mutex> lock(g_gearCtxMutex);
++    uint32 now = getMSTime();
++    auto key = std::make_pair(bot->GetGUID().GetRawValue(), player->GetGUID().GetRawValue());
++    auto it = g_lastGearCtxByPair.find(key);
++    if (it != g_lastGearCtxByPair.end() && now - it->second < cooldownMin * MINUTE * IN_MILLISECONDS)
++        return false;
++    g_lastGearCtxByPair[key] = now;
++    return true;
 +}
 +
 +// Actually hand the item over: mail it from the bot to the player (COD for
@@ -1298,9 +1318,12 @@ index cc89b9f..e12ee6b 100644
 +        return "";
 +
 +    // Well-geared players get recognition, not upgrade nagging - a 2008 player
-+    // would know raid sets and PvP gear on sight.
++    // would know raid sets and PvP gear on sight. Commentary-only, so it is
++    // throttled per pair.
 +    if (worstIlvl > 0 && worstIlvl >= player->GetLevel())
 +    {
++        if (!GearCommentaryAllowed(bot, player))
++            return "";
 +        if (resilienceCount >= 4)
 +            return fmt::format("(You inspected {}: they are wearing serious PvP resilience gear - not someone to lecture about gear.)",
 +                               player->GetName());
@@ -1339,6 +1362,7 @@ index cc89b9f..e12ee6b 100644
 +        worstIlvl == 0 ? std::string("empty") : fmt::format("item level {}", worstIlvl),
 +        ClassPrimaryStat(player->getClass()));
 +
++    bool gaveSomething = false;
 +    if (offer)
 +    {
 +        std::string personality = GetBotPersonality(bot);
@@ -1374,6 +1398,7 @@ index cc89b9f..e12ee6b 100644
 +                                           itemName);
 +                    LOG_INFO("server.loading", "[Ollama Chat] [GearGive] {} ({}) mailed {} to {} (COD {} copper)",
 +                             bot->GetName(), personality, itemName, player->GetName(), cod);
++                    gaveSomething = true;
 +                }
 +            }
 +            else
@@ -1391,10 +1416,17 @@ index cc89b9f..e12ee6b 100644
 +                                       itemName);
 +                LOG_INFO("server.loading", "[Ollama Chat] [GearGive] {} ({}) parked {} for in-person trade with {} (cod {} copper)",
 +                         bot->GetName(), personality, itemName, player->GetName(), cod);
++                gaveSomething = true;
 +            }
 +        }
 +        // roll failed: say nothing about the item - no empty promises
 +    }
++
++    // A real give must always be announced; plain gear commentary is
++    // throttled so bots answer what was actually said instead of reviewing
++    // your outfit every message.
++    if (!gaveSomething && !GearCommentaryAllowed(bot, player))
++        return "";
 +
 +    ctx += ")";
 +    return ctx;
@@ -1406,7 +1438,7 @@ index cc89b9f..e12ee6b 100644
      if (!bot || !player) {
          return "";
      }
-@@ -1853,6 +2108,7 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
+@@ -1853,6 +2140,7 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
  
      std::string chatHistory         = GetBotHistoryPrompt(botGuid, playerGuid, playerMessage);
      std::string sentimentInfo       = GetSentimentPromptAddition(bot, player);
@@ -1414,7 +1446,7 @@ index cc89b9f..e12ee6b 100644
  
      // Retrieve RAG information if enabled
      std::string ragInfo;
-@@ -1906,7 +2162,9 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
+@@ -1906,7 +2194,9 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
          fmt::arg("player_message", playerMessage),
          fmt::arg("extra_info", extraInfo),
          fmt::arg("chat_history", chatHistory),
@@ -1425,7 +1457,7 @@ index cc89b9f..e12ee6b 100644
      );
  
      // Add RAG information to the prompt if available
-@@ -1926,3 +2184,58 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
+@@ -1926,3 +2216,58 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
  
      return prompt;
  }

@@ -646,7 +646,10 @@ def gen_chat_example(rng):
         gcat = {"gift": "gear_gift", "cod": "gear_cod", "park_gift": "gear_park_gift",
                 "park_cod": "gear_park_cod", "weak": "gear_advice"}.get(gkind, "gear_good")
         must_react = gkind in ("gift", "cod", "park_gift", "park_cod")
-        if must_react or (rng.random() < 0.65 and sent_kind != "hostile"):
+        # gear COMMENTARY may only displace idle chatter - never a real request
+        # (lfg/directions/quest help/etc get answered, gear context or not)
+        commentary_ok = cat in ("greeting", "hows_it_going", "smalltalk", "compliment", "insult")
+        if must_react or (commentary_ok and rng.random() < 0.5 and sent_kind != "hostile"):
             gbank = GEAR_BANKS.get(pkey, {})
             greplies = gbank.get(gcat) or GENERIC[gcat]
             reply = (rng.choice(greplies).replace("{slot}", gslot or "gear").replace("{stat}", gstat)
