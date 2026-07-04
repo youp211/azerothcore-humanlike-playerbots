@@ -632,3 +632,26 @@ Compile-time constants (anon ns in `GuildRecruitmentEvent.cpp`, not config):
   system, the Ollama query pipeline (`SubmitQuery` / `OllamaQueryOptions`), and
   `PlayerbotGuildMgr`'s random-bot guild lifecycle (`Init`, `ValidateGuildCache`,
   `DeleteBotGuilds`, the hourly `BotGuildCacheWorldScript`).
+
+---
+
+## Lifecycle update (2026-07-03): batch → emergent
+
+Guild creation is no longer a one-time batch. See the newer files and entry
+points (this section supersedes any "batch formation at last-bot-login"
+description above):
+
+- `PersonalityGuildFactory::FormPersonalityGuilds()` now only seeds a few
+  guilds; `TryFoundOneGuild()` founds a single guild on demand from a fresh
+  online-guildless-bot snapshot; `UpdateEmergentFounding(diff)` (ticked from
+  `PlayerbotsWorldScript::OnUpdate`) calls it gradually up to `TargetCount`.
+- `OngoingGuildRecruit` (`src/Bot/Factory/OngoingGuildRecruit.cpp`) grows guilds
+  by recruiting nearby unguilded bots (archetype-fit) and the player
+  (sentiment-gated, globally rate-limited via `g_lastPlayerInviteMs`).
+- `PartyGuildFormation` (`src/Bot/Factory/PartyGuildFormation.cpp`) turns a
+  good player+bot party into a guild (GroupScript + `OnPlayerJustDied` +
+  the `PartyGuild_OnPlayerRequest` weak symbol from mod-ollama-chat's
+  party-chat intent).
+- The realm-start `GuildRecruitmentEvent` is decoupled (uncalled).
+- Elite purity, membership cap, and single-membership invariants are preserved
+  in all three (party→guild intentionally excepts fit for the player's crew).

@@ -123,9 +123,15 @@ JOIN acore_characters.item_instance ii ON ii.guid = ah.itemguid LIMIT 20;
       the conversation references earlier channel lines
 - [ ] `[Channel]` announces appear a few per hour with real players around
 
-## 13. Realm-start recruitment (fresh world only)
-- [ ] Within ~2 min of full bot login, guild leaders appear at racial starting
-      areas and pitch every minute or so (`[GuildRecruit]` logs)
-- [ ] A fresh sub-10 unguilded character gets a guild invite popup + in-voice
-      whisper; accepting joins the themed guild
-- [ ] After 15 min leaders vanish back to their normal lives
+## 13. Guild lifecycle (emergent / recruiting / party→guild)
+- [ ] Fresh world starts with ~2 guilds; more appear over time (one per ~5 min
+      up to 12). `grep "\[EmergentGuild\]" server/bin/Playerbots.log`
+- [ ] Guilds grow past their small founding size as founders recruit nearby
+      bots. `grep "\[OngoingRecruit\]"` (gentle: ~1 player invite / 30 min max)
+- [ ] Hang near a guild-founder bot that likes you → eventually a guild-invite
+      popup with an in-voice pitch (not spammy)
+- [ ] **Party→guild**: group with a few bots, run together 5+ min without
+      wiping → chance it forms a guild (bots suggest names in-voice); OR say
+      "let's guild up" in party chat to trigger it if the party qualifies.
+      `grep "\[PartyGuild\]"`. A wipe (several deaths) makes it decline.
+- [ ] `./validate-guilds.sh` → all PASS/WARN, no FAIL

@@ -359,13 +359,46 @@ firehoses (`mod-ollama-chat_channels.cpp`):
   `ChannelReplyCooldownSec`, `ChannelAnnounceIntervalSec`,
   `ChannelAnnounceChance`. Logs: `[Channel]`.
 
-## 12. Realm-start guild recruitment (2026-07-03)
+## 12. Guild lifecycle: emergent formation, recruiting & party→guild (2026-07-03)
 
-After personality guilds form on a fresh world, each leader teleports to **its
-own race's starting area** (from `playercreateinfo`), pitches its guild
-in-voice every 60–90 s for `AiPlayerbot.GuildRecruitMinutes` (15), and sends
-guild invites to nearby unguilded real players under level 10 (once per
-player, ≤10 per leader), then teleports back to its old life
-(`mod-playerbots/src/Bot/Factory/GuildRecruitmentEvent.cpp`). Accept one and
-you level inside that leader's guild from day one. Conf:
-`AiPlayerbot.GuildRecruit{Enabled,Minutes,InviteRange}`. Logs: `[GuildRecruit]`.
+Guilds are a living part of the world, not a startup batch. Three cooperating
+systems in `mod-playerbots` (full code map in
+[internals/12-guilds.md](internals/12-guilds.md)):
+
+**Emergent formation** (`PersonalityGuildFactory::UpdateEmergentFounding`). The
+world starts with a small seed (`PersonalityGuild.SeedCount`, 2) and then
+founds **one** new guild every `PersonalityGuild.FoundIntervalSec` (300 s)
+while the guild count is under `PersonalityGuild.TargetCount` (12). Each
+founding picks an online, guildless leader-personality bot for a weighted
+archetype (raid/pvp/casual), creates the guild, seeds it *small*
+(`FoundInitialMembers`, 4 — leaving headroom to grow), and LLM-names it. So
+guilds trickle into existence over time, unseen, and accumulate their own
+history (members, sentiments, shared memories). Log: `[EmergentGuild]`.
+
+**Ongoing recruiting** (`OngoingGuildRecruit`). Every
+`OngoingRecruitIntervalSec` (180 s), each guild-founder bot with a
+leader/interactive personality recruits nearby (≤30 yd) unguilded targets:
+**bots** it pulls in respect the guild's archetype fit-set (elite guilds stay
+fit-only); **you** get a sentiment-gated invite with an in-voice pitch.
+Deliberately gentle — per-personality chances 12–50%, a 120-min per-pair
+cooldown, and a **global 30-min cap on player invite popups** across all
+leaders (`OngoingRecruitPlayerCooldownMin`) so it never spams. Guilds grow
+gradually toward the cap. Log: `[OngoingRecruit]`.
+
+**Party→guild** (`PartyGuildFormation`). Group with bots and, if the run goes
+well, the party can crystallize into a guild. Gates: the party (you + ≥1 bot)
+must be alive ≥ `PartyGuild.MinMinutes` (5) with a *good outcome* — the chance
+starts at `PartyGuild.BaseChance` (8%) and drops `PartyGuild.DeathPenalty` (6)
+per member death, so a wipe kills it. Two triggers: a periodic roll
+(`CheckIntervalSec`, 120 s), or **you initiating** in party chat ("let's guild
+up" — detected in mod-ollama-chat, routed via the weak
+`PartyGuild_OnPlayerRequest`). The founder is the party's most leader-like bot
+(or forms around you if you initiated); other bots **suggest names in-voice**
+first, then the founder LLM-names it and invites the whole crew (elite-purity
+is intentionally bypassed — it's *your* party). Log: `[PartyGuild]`.
+
+*(The old realm-start teleport-to-spawn recruiter was removed — leaders drifted
+and its 15-min window was easy to miss; ongoing recruiting supersedes it. The
+`GuildRecruitmentEvent` file remains on disk, uncalled.)*
+
+Validate the whole system anytime with `./validate-guilds.sh`.

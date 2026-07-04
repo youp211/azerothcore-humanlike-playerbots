@@ -1106,10 +1106,10 @@ index 3387db3..0fc098f 100644
  #endif // MOD_OLLAMA_CHAT_EVENTS_H
 diff --git a/src/mod-ollama-chat_groupjoin.cpp b/src/mod-ollama-chat_groupjoin.cpp
 new file mode 100644
-index 0000000..18dc56d
+index 0000000..bafaf9e
 --- /dev/null
 +++ b/src/mod-ollama-chat_groupjoin.cpp
-@@ -0,0 +1,342 @@
+@@ -0,0 +1,363 @@
 +#include "mod-ollama-chat_groupjoin.h"
 +
 +#include "Common.h"
@@ -1205,6 +1205,27 @@ index 0000000..18dc56d
 +
 +    bool cue = (m.find('?') != std::string::npos) || ContainsWholeWord(m, "me") || ContainsWholeWord(m, "us");
 +    return cue;
++}
++
++// ---------------------------------------------------------------------------
++// LooksLikeGuildFormRequest - the player proposing the party turn into a guild.
++// Deliberately narrow phrase list (no weak tier): only unambiguous "let's make a
++// guild" style lines match, so ordinary guild chatter does not trigger formation.
++// ---------------------------------------------------------------------------
++bool LooksLikeGuildFormRequest(std::string const& msg)
++{
++    std::string const m = ToLower(msg);
++
++    static char const* const kPhrases[] = {
++        "start a guild", "make a guild", "form a guild", "found a guild", "create a guild",
++        "start our own guild", "make our own guild", "guild up", "lets guild", "let's guild",
++        "should be a guild", "become a guild", "turn this into a guild"
++    };
++    for (char const* phrase : kPhrases)
++        if (m.find(phrase) != std::string::npos)
++            return true;
++
++    return false;
 +}
 +
 +// ---------------------------------------------------------------------------
@@ -1454,10 +1475,10 @@ index 0000000..18dc56d
 +}
 diff --git a/src/mod-ollama-chat_groupjoin.h b/src/mod-ollama-chat_groupjoin.h
 new file mode 100644
-index 0000000..65a0196
+index 0000000..815841d
 --- /dev/null
 +++ b/src/mod-ollama-chat_groupjoin.h
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,52 @@
 +#ifndef MOD_OLLAMA_CHAT_GROUPJOIN_H
 +#define MOD_OLLAMA_CHAT_GROUPJOIN_H
 +
@@ -1488,6 +1509,10 @@ index 0000000..65a0196
 +// Simple, tunable keyword list (see the .cpp for the exact patterns).
 +bool LooksLikeGroupRequest(std::string const& msg);
 +
++// True if the message reads like the player proposing the party form a guild
++// ("let's start a guild", "guild up", ...). Narrow, unambiguous phrases only.
++bool LooksLikeGuildFormRequest(std::string const& msg);
++
 +// Personality/playstyle/sentiment-weighted chance (clamped 5..95) that this
 +// bot agrees to group up with the given player.
 +float GroupJoinChanceFor(Player* bot, Player* player);
@@ -1507,7 +1532,7 @@ index 0000000..65a0196
 +
 +#endif // MOD_OLLAMA_CHAT_GROUPJOIN_H
 diff --git a/src/mod-ollama-chat_handler.cpp b/src/mod-ollama-chat_handler.cpp
-index cc89b9f..689ded0 100644
+index cc89b9f..815bd9f 100644
 --- a/src/mod-ollama-chat_handler.cpp
 +++ b/src/mod-ollama-chat_handler.cpp
 @@ -12,9 +12,15 @@
@@ -1537,7 +1562,15 @@ index cc89b9f..689ded0 100644
  #include <iomanip>
  #include "SpellMgr.h"
  #include "SpellInfo.h"
-@@ -52,7 +61,8 @@
+@@ -49,10 +58,16 @@
+ #include "Map.h"
+ #include "GridNotifiers.h"
+ 
++// Provided by mod-playerbots (same binary): route a real player's party-chat
++// "let's guild up" line to the emergent PARTY -> GUILD formation mechanic.
++// Weakly optional - null (and the call a no-op) when mod-playerbots is absent.
++[[gnu::weak]] void PartyGuild_OnPlayerRequest(Player* player);
++
  // Forward declarations for internal helper functions.
  static bool IsBotEligibleForChatChannelLocal(Player* bot, Player* player,
                                               ChatChannelSourceLocal source, Channel* channel = nullptr, Player* receiver = nullptr);
@@ -1547,7 +1580,7 @@ index cc89b9f..689ded0 100644
  
  // Helper function to format class name for any player
  static std::string FormatPlayerClass(uint8_t classId)
-@@ -286,8 +296,10 @@ void SaveBotConversationHistoryToDB()
+@@ -286,8 +301,10 @@ void SaveBotConversationHistoryToDB()
      }
  
      // Cleanup: keep only the N most recent entries per bot/player pair
@@ -1559,7 +1592,7 @@ index cc89b9f..689ded0 100644
              SELECT
                  bot_guid,
                  player_guid,
-@@ -297,13 +309,11 @@ void SaveBotConversationHistoryToDB()
+@@ -297,13 +314,11 @@ void SaveBotConversationHistoryToDB()
                      ORDER BY timestamp DESC
                  ) as rn
              FROM mod_ollama_chat_history
@@ -1578,7 +1611,7 @@ index cc89b9f..689ded0 100644
      )SQL";
      CharacterDatabase.Execute(SafeFormat(cleanupQuery, g_MaxConversationHistory));
  }
-@@ -864,7 +874,14 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
+@@ -864,7 +879,14 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
          }
          return;
      }
@@ -1594,7 +1627,26 @@ index cc89b9f..689ded0 100644
      if ((sourceLocal == SRC_SAY_LOCAL || sourceLocal == SRC_YELL_LOCAL) && g_DisableForSayYell)
      {
          if (g_DebugEnabled)
-@@ -1336,18 +1353,28 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
+@@ -894,7 +916,17 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
+              
+     PlayerbotAI* senderAI = PlayerbotsMgr::instance().GetPlayerbotAI(player);
+     bool senderIsBot = (senderAI && senderAI->IsBotAI());
+-    
++
++    // PARTY -> GUILD: when the real player proposes guilding up in party chat,
++    // route it to mod-playerbots' emergent-formation mechanic (it owns the
++    // response - name suggestions or an in-voice decline). Fire-and-continue:
++    // normal party chatter still proceeds. No-op if mod-playerbots is absent.
++    if (sourceLocal == SRC_PARTY_LOCAL && !senderIsBot && PartyGuild_OnPlayerRequest &&
++        LooksLikeGuildFormRequest(msg))
++    {
++        PartyGuild_OnPlayerRequest(player);
++    }
++
+     std::vector<Player*> eligibleBots;
+     
+     // Handle different chat sources differently
+@@ -1336,18 +1368,28 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
                      }
                      continue;
                  }
@@ -1626,7 +1678,7 @@ index cc89b9f..689ded0 100644
                  }
              }
          }
-@@ -1408,13 +1435,44 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
+@@ -1408,13 +1450,44 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
          if (bot == nullptr) {
              continue;
          }
@@ -1675,7 +1727,7 @@ index cc89b9f..689ded0 100644
                  if (!responseFuture.valid())
                  {
                      return;
-@@ -1475,7 +1533,21 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
+@@ -1475,7 +1548,21 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
                      senderPtr = ObjectAccessor::FindPlayer(ObjectGuid(senderGuid));
                      if (!senderPtr) return;
                  }
@@ -1698,7 +1750,7 @@ index cc89b9f..689ded0 100644
                  // Route the response.
                  if (channelId != 0 && !channelName.empty())
                  {
-@@ -1500,6 +1572,11 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
+@@ -1500,6 +1587,11 @@ void PlayerBotChatHandler::ProcessChat(Player* player, uint32_t /*type*/, uint32
                                              botPtr->GetName(), channelName);
                                  }
                                  targetChannel->Say(botPtr->GetGUID(), response, LANG_UNIVERSAL);
@@ -1710,7 +1762,7 @@ index cc89b9f..689ded0 100644
                                  ProcessBotChatMessage(botPtr, response, SRC_GENERAL_LOCAL, targetChannel);
                                  if(g_DebugEnabled)
                                  {
-@@ -1797,8 +1874,286 @@ static bool IsBotEligibleForChatChannelLocal(Player* bot, Player* player, ChatCh
+@@ -1797,8 +1889,286 @@ static bool IsBotEligibleForChatChannelLocal(Player* bot, Player* player, ChatCh
      }
  }
  
@@ -1999,7 +2051,7 @@ index cc89b9f..689ded0 100644
      if (!bot || !player) {
          return "";
      }
-@@ -1853,6 +2208,7 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
+@@ -1853,6 +2223,7 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
  
      std::string chatHistory         = GetBotHistoryPrompt(botGuid, playerGuid, playerMessage);
      std::string sentimentInfo       = GetSentimentPromptAddition(bot, player);
@@ -2007,7 +2059,7 @@ index cc89b9f..689ded0 100644
  
      // Retrieve RAG information if enabled
      std::string ragInfo;
-@@ -1906,7 +2262,9 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
+@@ -1906,7 +2277,9 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
          fmt::arg("player_message", playerMessage),
          fmt::arg("extra_info", extraInfo),
          fmt::arg("chat_history", chatHistory),
@@ -2018,7 +2070,7 @@ index cc89b9f..689ded0 100644
      );
  
      // Add RAG information to the prompt if available
-@@ -1919,6 +2277,14 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
+@@ -1919,6 +2292,14 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
          prompt += GenerateBotGameStateSnapshot(bot);
      }
  
@@ -2033,7 +2085,7 @@ index cc89b9f..689ded0 100644
      // Debug logging for full prompt including RAG information
      if (g_DebugEnabled && g_DebugShowFullPrompt) {
          LOG_INFO("server.loading", "[Ollama Chat] Full prompt sent to bot {} for player {}: {}", botName, playerName, prompt);
-@@ -1926,3 +2292,58 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
+@@ -1926,3 +2307,58 @@ std::string GenerateBotPrompt(Player* bot, std::string playerMessage, Player* pl
  
      return prompt;
  }

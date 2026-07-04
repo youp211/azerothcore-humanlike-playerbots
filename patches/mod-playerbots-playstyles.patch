@@ -1,39 +1,111 @@
 diff --git a/conf/playerbots.conf.dist b/conf/playerbots.conf.dist
-index a03b13e3..9d915d34 100644
+index a03b13e3..b4cb310e 100644
 --- a/conf/playerbots.conf.dist
 +++ b/conf/playerbots.conf.dist
-@@ -174,6 +174,30 @@ AiPlayerbot.RandomBotGuildSizeMax = 15
+@@ -174,6 +174,102 @@ AiPlayerbot.RandomBotGuildSizeMax = 15
  # Delete all randombot guilds if set to 1
  AiPlayerbot.DeleteRandomBotGuilds = 0
  
 +###################################################################################################
-+# PERSONALITY-DRIVEN GUILDS
++# PERSONALITY-DRIVEN GUILDS (EMERGENT FORMATION)
 +#
-+# Themed guilds (raid / pvp / casual) formed once per server start from the pool of online, guildless
-+# random bots. Leaders and elite (raid/pvp) membership are selected by the bot's mod-ollama-chat
-+# personality; casual guilds take the remaining bots with randomness. Guild size is capped by
-+# AiPlayerbot.RandomBotGuildSizeMax above. Set all counts to 0 to disable.
++# Themed guilds (raid / pvp / casual) form GRADUALLY as the world evolves, rather than in one batch
++# at realm start. A few seed guilds are founded at startup (SeedCount); thereafter, every
++# FoundIntervalSec, one more guild is founded while the number of random-bot guilds is below
++# TargetCount. Each founding picks a leader by mod-ollama-chat personality and seeds the guild SMALL
++# (FoundInitialMembers), leaving headroom for the ongoing recruiter (below) to grow it over time and
++# for the real player to join. Elite (raid/pvp) guilds admit only personality-fit members; casual
++# guilds admit anyone with a join chance. Guild size is capped by AiPlayerbot.RandomBotGuildSizeMax.
 +###################################################################################################
 +
-+# Number of hardcore-PvE raid guilds to form
++# Number of guilds founded immediately at realm start (the rest emerge over time)
++AiPlayerbot.PersonalityGuild.SeedCount = 2
++
++# Stop founding new guilds once this many random-bot guilds exist
++AiPlayerbot.PersonalityGuild.TargetCount = 12
++
++# Seconds between emergent-founding attempts (0 disables ongoing founding)
++AiPlayerbot.PersonalityGuild.FoundIntervalSec = 300
++
++# Members a newly-founded guild starts with, INCLUDING the leader (kept small on purpose;
++# the ongoing recruiter grows the guild the rest of the way toward RandomBotGuildSizeMax)
++AiPlayerbot.PersonalityGuild.FoundInitialMembers = 4
++
++# Relative weights for the archetype of each founded guild (Raid : Pvp : Casual). These no longer
++# set fixed guild counts - they only bias which archetype the next guild will be. Set all to 0 to
++# fall back to the built-in ~1:1:2 mix.
 +AiPlayerbot.PersonalityGuild.RaidCount = 4
-+
-+# Number of PvP guilds to form
 +AiPlayerbot.PersonalityGuild.PvpCount = 3
-+
-+# Number of casual guilds to form
 +AiPlayerbot.PersonalityGuild.CasualCount = 8
 +
 +# Minimum level a bot must be to lead a personality guild
 +AiPlayerbot.PersonalityGuild.LeaderMinLevel = 1
 +
-+# Per-bot chance (0-100) that an eligible bot rolls into a casual guild
++# Per-bot chance (0-100) that an eligible bot rolls into a casual guild at founding
 +AiPlayerbot.PersonalityGuild.CasualJoinChance = 40.0
++
++###################################################################################################
++# ONGOING OPPORTUNISTIC GUILD RECRUITMENT
++#
++# During normal play, a bot that FOUNDED a guild (it is the leader) and has a leader/interactive
++# personality keeps recruiting: it periodically sends guild invites to nearby unguilded bots and
++# to the nearby unguilded real player, in its own voice. Elite (raid/pvp) guilds only admit bots
++# whose personality fits the guild (purity preserved); casual guilds admit anyone. Invited bots
++# auto-accept; the real player chooses. Guild size is capped by AiPlayerbot.RandomBotGuildSizeMax.
++###################################################################################################
++
++# Master switch for ongoing opportunistic guild recruitment
++AiPlayerbot.OngoingRecruitEnabled = 1
++
++# Seconds between recruitment passes over online guild-leader bots
++AiPlayerbot.OngoingRecruitIntervalSec = 180
++
++# Yard radius scanned around a recruiting leader for candidates
++AiPlayerbot.OngoingRecruitRange = 30.0
++
++# Minutes before the same target may be re-invited by the same recruiter
++AiPlayerbot.OngoingRecruitCooldownMin = 120
++
++# Chance bonus (0-100) added when the recruiter's sentiment toward the player is high (>= 0.6)
++AiPlayerbot.OngoingRecruitSentimentBonus = 15
++AiPlayerbot.OngoingRecruitPlayerCooldownMin = 30
++
++###################################################################################################
++# PARTY -> GUILD EMERGENT FORMATION
++#
++# When the real player groups with random bots and the run goes WELL, that party can spontaneously
++# become a guild. Every group that contains the real player plus at least one random bot is tracked
++# from the moment it qualifies: how long it has lived and how many member deaths it has suffered.
++# A party becomes guild-eligible once it has been alive at least MinMinutes and the outcome is good -
++# a formation chance that STARTS at BaseChance and is reduced by DeathPenalty per death (floored at
++# 0), so a clean, long-lived party is far likelier to guild up than a wiped one.
++#
++# Two triggers: (1) a periodic world-thread tick (every CheckIntervalSec) rolls the outcome-adjusted
++# chance; (2) the player says a "let's guild up" line in party chat (routed from mod-ollama-chat),
++# which bypasses the random roll but still requires the MinMinutes + not-wiped gate - otherwise a
++# party bot declines in-voice. On formation, the most leader-suited bot founds the guild and invites
++# the whole crew (bots auto-accept; the player chooses); the founder's personality names the guild.
++###################################################################################################
++
++# Master switch for party -> guild emergent formation
++AiPlayerbot.PartyGuild.Enabled = 1
++
++# Minutes a party must have been alive before it can become a guild
++AiPlayerbot.PartyGuild.MinMinutes = 5
++
++# Starting formation chance (0-100) for a clean party with no deaths
++AiPlayerbot.PartyGuild.BaseChance = 8.0
++
++# Chance reduction per member death during the party's life (floored at 0)
++AiPlayerbot.PartyGuild.DeathPenalty = 6.0
++
++# Seconds between spontaneous-formation evaluation ticks
++AiPlayerbot.PartyGuild.CheckIntervalSec = 120
 +
  # Randombots will invite players to groups/raids/guilds
  AiPlayerbot.RandomBotInvitePlayer = 0
  
-@@ -2351,3 +2375,19 @@ AiPlayerbot.TargetPosRecalcDistance = 0.1
+@@ -2351,3 +2447,19 @@ AiPlayerbot.TargetPosRecalcDistance = 0.1
  
  # Allow bots to be summoned near innkeepers
  AiPlayerbot.SummonAtInnkeepersEnabled = 1
@@ -1592,12 +1664,1083 @@ index 00000000..d8c46e77
 +};
 +
 +#endif
+diff --git a/src/Bot/Factory/OngoingGuildRecruit.cpp b/src/Bot/Factory/OngoingGuildRecruit.cpp
+new file mode 100644
+index 00000000..80aac54e
+--- /dev/null
++++ b/src/Bot/Factory/OngoingGuildRecruit.cpp
+@@ -0,0 +1,352 @@
++/*
++ * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license, you may redistribute it
++ * and/or modify it under version 3 of the License, or (at your option), any later version.
++ */
++
++#include "OngoingGuildRecruit.h"
++
++#include "Cell.h"
++#include "CellImpl.h"
++#include "Common.h"
++#include "Config.h"
++#include "DatabaseEnv.h"
++#include "GridNotifiers.h"
++#include "GridNotifiersImpl.h"
++#include "Guild.h"
++#include "GuildMgr.h"
++#include "Log.h"
++#include "ObjectAccessor.h"
++#include "Opcodes.h"
++#include "Player.h"
++#include "PlayerbotAIConfig.h"
++#include "PlayerbotMgr.h"
++#include "Random.h"
++#include "RandomPlayerbotMgr.h"
++#include "StringFormat.h"
++#include "Timer.h"
++#include "WorldPacket.h"
++#include "WorldSession.h"
++
++#include <algorithm>
++#include <list>
++#include <map>
++#include <string>
++#include <unordered_map>
++#include <unordered_set>
++
++// Provided by mod-ollama-chat (same binary): make a bot SAY or WHISPER a short,
++// in-character, LLM-generated line about a concrete situation. Weakly optional -
++// null (and the call a no-op) when the chat module is disabled. Same weak hook
++// GuildRecruitmentEvent uses for its realm-start pitches.
++[[gnu::weak]] void OllamaChat_SpeakSituation(Player* bot, Player* target, std::string const& situation, bool whisper);
++
++namespace
++{
++    // Global "last time the REAL player was sent a guild invite" (any leader).
++    // World-thread-only access (the recruiter tick), so a plain static is safe.
++    uint32 g_lastPlayerInviteMs = 0;
++
++    void SpeakSituation(Player* bot, Player* target, std::string const& situation, bool whisper)
++    {
++        if (OllamaChat_SpeakSituation)
++            OllamaChat_SpeakSituation(bot, target, situation, whisper);
++    }
++
++    using PersonalitySet = std::unordered_set<std::string>;
++
++    // Authoritative leader / fit sets - a verbatim mirror of PersonalityGuildFactory's
++    // (they live in that file's anonymous namespace, so cannot be shared directly).
++    // Archetype and elite fit enforcement below reconstruct a guild's original rules
++    // from its leader's personality, keeping recruitment consistent with formation.
++    PersonalitySet const RAID_LEADERS   = {"HARDCORE_RAIDLEAD", "THEORYCRAFTER", "MIN_MAXER", "LORE_NERD"};
++    PersonalitySet const PVP_LEADERS    = {"ELITE_ARENA_PVPER", "PVP_TRASHTALKER", "DUELIST", "RAGER"};
++    PersonalitySet const CASUAL_LEADERS = {"WOW_MOM",     "MENTOR",           "GUILD_RECRUITER",
++                                           "CHILL_DAD",   "JOLLY_BEER_LOVER", "HEROIC_LEADER"};
++
++    PersonalitySet const RAID_FIT = {"RAIDER",      "THEORYCRAFTER", "MIN_MAXER",          "HARDCORE_RAIDLEAD",
++                                     "HEALER_MAIN", "SPEEDRUNNER",   "ACHIEVEMENT_HUNTER", "LORE_NERD"};
++    PersonalitySet const PVP_FIT  = {"PVP_HARDCORE", "PVP_TRASHTALKER", "DUELIST",
++                                     "ELITE_ARENA_PVPER", "RAGER", "EDGE_LORD"};
++
++    // How often (0-100) a guild leader with this personality opportunistically
++    // recruits during normal play - the "frequently a party leader / interactive"
++    // gate. Any other recognised leader personality gets 25; a non-leader
++    // personality gets 0 and never recruits (guild leaders only reach here anyway).
++    float OngoingRecruitChanceFor(std::string const& personality)
++    {
++        // Tight per-check chances (combined with a 3-min interval + 2-hr per-pair
++        // cooldown, so even the chattiest recruiter invites a given target rarely).
++        static std::unordered_map<std::string, float> const kChances = {
++            {"GUILD_RECRUITER", 50.0f}, {"LFG_SPAMMER", 35.0f},       {"HEROIC_LEADER", 30.0f},
++            {"MENTOR", 28.0f},          {"WOW_MOM", 28.0f},           {"JOLLY_BEER_LOVER", 22.0f},
++            {"CHILL_DAD", 22.0f},       {"HARDCORE_RAIDLEAD", 20.0f}, {"ELITE_ARENA_PVPER", 15.0f},
++        };
++        auto it = kChances.find(personality);
++        if (it != kChances.end())
++            return it->second;
++        if (RAID_LEADERS.count(personality) || PVP_LEADERS.count(personality) || CASUAL_LEADERS.count(personality))
++            return 12.0f;
++        return 0.0f;
++    }
++
++    // The fit-set an elite guild enforces on bot recruits, derived from its
++    // leader's personality; nullptr for a casual guild (anyone fits).
++    PersonalitySet const* FitSetForLeader(std::string const& leaderPersonality)
++    {
++        if (RAID_LEADERS.count(leaderPersonality))
++            return &RAID_FIT;
++        if (PVP_LEADERS.count(leaderPersonality))
++            return &PVP_FIT;
++        return nullptr;  // casual: no fit requirement
++    }
++
++    char const* ArchetypeName(std::string const& leaderPersonality)
++    {
++        if (RAID_LEADERS.count(leaderPersonality))
++            return "raid";
++        if (PVP_LEADERS.count(leaderPersonality))
++            return "pvp";
++        return "casual";
++    }
++
++    // guid -> personality from the shared characters DB, guid-cached. Empty
++    // results are re-checked after 5 min; a found personality is cached for good.
++    // Mirrors GetBotPlaystyle's cache shape (NewRpgBaseAction.cpp).
++    std::string GetPersonality(ObjectGuid guid)
++    {
++        static int hasTable = -1;
++        if (hasTable == -1)
++            hasTable = CharacterDatabase.Query(
++                          "SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() "
++                          "AND TABLE_NAME = 'mod_ollama_chat_personality'")
++                          ? 1
++                          : 0;
++        if (!hasTable)
++            return "";
++
++        ObjectGuid::LowType const low = guid.GetCounter();
++        uint32 const now = getMSTime();
++        static std::mutex cacheMutex;
++        static std::map<ObjectGuid::LowType, std::pair<std::string, uint32>> cache;
++        {
++            std::lock_guard<std::mutex> lock(cacheMutex);
++            auto it = cache.find(low);
++            if (it != cache.end() &&
++                (!it->second.first.empty() || now - it->second.second < 5 * MINUTE * IN_MILLISECONDS))
++                return it->second.first;
++        }
++
++        std::string personality;
++        if (QueryResult result = CharacterDatabase.Query(
++                "SELECT personality FROM mod_ollama_chat_personality WHERE guid = {}", low))
++            personality = (*result)[0].Get<std::string>();
++
++        std::lock_guard<std::mutex> lock(cacheMutex);
++        cache[low] = {personality, now};
++        return personality;
++    }
++
++    // Recruiter -> real-player sentiment (shared characters DB, guid counters),
++    // cached per pair; neutral 0.5 when the chat module or the row is absent.
++    // Mirrors InviteToGroupAction's GetBotPlayerSentiment.
++    float GetSentiment(Player* bot, Player* player)
++    {
++        static int hasTable = -1;
++        if (hasTable == -1)
++            hasTable = CharacterDatabase.Query(
++                          "SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() "
++                          "AND TABLE_NAME = 'mod_ollama_chat_bot_player_sentiments'")
++                          ? 1
++                          : 0;
++        if (!hasTable)
++            return 0.5f;
++
++        static std::mutex cacheMutex;
++        static std::map<std::pair<ObjectGuid::LowType, ObjectGuid::LowType>, std::pair<float, uint32>> cache;
++        auto const key = std::make_pair(bot->GetGUID().GetCounter(), player->GetGUID().GetCounter());
++        uint32 const now = getMSTime();
++        {
++            std::lock_guard<std::mutex> lock(cacheMutex);
++            auto it = cache.find(key);
++            if (it != cache.end() && now - it->second.second < 5 * MINUTE * IN_MILLISECONDS)
++                return it->second.first;
++        }
++
++        float value = 0.5f;
++        if (QueryResult result = CharacterDatabase.Query(
++                "SELECT sentiment_value FROM mod_ollama_chat_bot_player_sentiments "
++                "WHERE bot_guid = {} AND player_guid = {}",
++                key.first, key.second))
++            value = (*result)[0].Get<float>();
++
++        std::lock_guard<std::mutex> lock(cacheMutex);
++        cache[key] = {value, now};
++        return value;
++    }
++
++    // Queue a CMSG_GUILD_INVITE on the leader's session for `target` - identical
++    // to GuildRecruitmentEvent::SendGuildInvite. The core runs the full invite
++    // path; the target pops SMSG_GUILD_INVITE. For a BOT target that outgoing
++    // packet is caught by its own "guild invite" handler (PlayerbotAI.cpp) which
++    // the world_packet ("default") strategy routes to GuildAcceptAction, so the
++    // bot auto-accepts. A real player gets the dialog and chooses.
++    void SendGuildInvite(Player* leader, Player* target)
++    {
++        WorldSession* session = leader->GetSession();
++        if (!session)
++            return;
++
++        WorldPacket* data = new WorldPacket(CMSG_GUILD_INVITE);
++        *data << target->GetName();
++        session->QueuePacket(data);
++    }
++}  // namespace
++
++OngoingGuildRecruit& OngoingGuildRecruit::instance()
++{
++    static OngoingGuildRecruit instance;
++    return instance;
++}
++
++void OngoingGuildRecruit::Update(uint32 diff)
++{
++    if (!sConfigMgr->GetOption<bool>("AiPlayerbot.OngoingRecruitEnabled", true))
++        return;
++
++    _accumMs += diff;
++    uint32 const intervalMs =
++        sConfigMgr->GetOption<uint32>("AiPlayerbot.OngoingRecruitIntervalSec", 180) * IN_MILLISECONDS;
++    if (_accumMs < intervalMs)
++        return;
++
++    _accumMs = 0;
++    Tick();
++}
++
++void OngoingGuildRecruit::Tick()
++{
++    float const range = sConfigMgr->GetOption<float>("AiPlayerbot.OngoingRecruitRange", 30.0f);
++    uint32 const cooldownMin = sConfigMgr->GetOption<uint32>("AiPlayerbot.OngoingRecruitCooldownMin", 120);
++    float const sentimentBonus = sConfigMgr->GetOption<float>("AiPlayerbot.OngoingRecruitSentimentBonus", 15.0f);
++    // Global anti-spam for the REAL player: at most one guild invite popup per
++    // this window across ALL leaders, no matter how many they pass.
++    uint32 const playerCdMs =
++        sConfigMgr->GetOption<uint32>("AiPlayerbot.OngoingRecruitPlayerCooldownMin", 30) * MINUTE * IN_MILLISECONDS;
++    uint32 const cooldownMs = cooldownMin * MINUTE * IN_MILLISECONDS;
++    uint32 const cap = std::max<uint32>(2, sPlayerbotAIConfig.randomBotGuildSizeMax);
++    uint32 const now = getMSTime();
++
++    for (auto const& kv : sRandomPlayerbotMgr.GetAllBots())
++    {
++        Player* leader = kv.second;
++        if (!leader || !leader->IsInWorld() || leader->IsBeingTeleported())
++            continue;
++
++        uint32 const guildId = leader->GetGuildId();
++        if (!guildId)
++            continue;
++
++        // Only a guild's FOUNDER/leader recruits for it.
++        Guild* guild = sGuildMgr->GetGuildById(guildId);
++        if (!guild || guild->GetLeaderGUID() != leader->GetGUID())
++            continue;
++
++        if (guild->GetMemberCount() >= cap)
++            continue;  // guild full - do not recruit
++
++        std::string const leaderPersonality = GetPersonality(leader->GetGUID());
++        float const baseChance = OngoingRecruitChanceFor(leaderPersonality);
++        if (baseChance <= 0.0f)
++            continue;  // not a leader/interactive personality
++
++        PersonalitySet const* fitSet = FitSetForLeader(leaderPersonality);
++        std::string const guildName = guild->GetName();
++        TeamId const team = leader->GetTeamId();
++        int32 slots = int32(cap) - int32(guild->GetMemberCount());
++
++        std::list<Player*> nearby;
++        Acore::AnyPlayerInObjectRangeCheck check(leader, range);
++        Acore::PlayerListSearcher<Acore::AnyPlayerInObjectRangeCheck> searcher(leader, nearby, check);
++        Cell::VisitObjects(leader, searcher, range);
++
++        for (Player* target : nearby)
++        {
++            if (slots <= 0)
++                break;  // guild is (about to be) full
++            if (!target || target == leader)
++                continue;
++            if (target->GetTeamId() != team)
++                continue;  // guild invites are same-faction
++            if (target->GetGuildId() || target->GetGuildIdInvited())
++                continue;  // already guilded, or already has a pending invite
++
++            // Per-(recruiter, target) cooldown so nobody is re-spammed.
++            auto const cdKey = std::make_pair(leader->GetGUID(), target->GetGUID());
++            {
++                std::lock_guard<std::mutex> lock(_mutex);
++                auto it = _lastInvite.find(cdKey);
++                if (it != _lastInvite.end() && now - it->second < cooldownMs)
++                    continue;
++            }
++
++            bool const targetIsBot = sPlayerbotsMgr.GetPlayerbotAI(target) != nullptr;
++
++            if (targetIsBot)
++            {
++                // Preserve elite purity: an elite guild only admits bots whose
++                // personality is in its fit-set. Casual guilds admit anyone.
++                if (fitSet && !fitSet->count(GetPersonality(target->GetGUID())))
++                    continue;
++
++                if (!roll_chance_f(baseChance))
++                    continue;
++
++                SendGuildInvite(leader, target);  // bot auto-accepts via its own packet handler
++                {
++                    std::lock_guard<std::mutex> lock(_mutex);
++                    _lastInvite[cdKey] = now;
++                }
++                --slots;
++                LOG_INFO("playerbots", "[OngoingRecruit] {} ({}) invited bot {} to '{}'", leader->GetName(),
++                         leaderPersonality, target->GetName(), guildName);
++
++                // Occasional in-voice say - audible recruitment without spam.
++                if (roll_chance_i(25))
++                    SpeakSituation(leader, nullptr,
++                                   Acore::StringFormat("you just recruited a fellow adventurer into your {} guild "
++                                                       "'{}' - say something short and welcoming",
++                                                       ArchetypeName(leaderPersonality), guildName),
++                                   false);
++            }
++            else
++            {
++                // The real player: always archetype-eligible, gated on sentiment;
++                // higher standing raises the chance. No auto-accept - they choose.
++                // Global cooldown first: never popup-spam the player across leaders.
++                if (playerCdMs && g_lastPlayerInviteMs && now - g_lastPlayerInviteMs < playerCdMs)
++                    continue;
++
++                float chance = baseChance;
++                if (GetSentiment(leader, target) >= 0.6f)
++                    chance += sentimentBonus;
++
++                if (!roll_chance_f(chance))
++                    continue;
++
++                SendGuildInvite(leader, target);
++                g_lastPlayerInviteMs = now;
++                {
++                    std::lock_guard<std::mutex> lock(_mutex);
++                    _lastInvite[cdKey] = now;
++                }
++                LOG_INFO("playerbots", "[OngoingRecruit] {} ({}) invited player {} to '{}'", leader->GetName(),
++                         leaderPersonality, target->GetName(), guildName);
++                SpeakSituation(leader, target,
++                               Acore::StringFormat("you're inviting {} to join your guild '{}' - give a short "
++                                                   "in-character pitch for why they should",
++                                                   target->GetName(), guildName),
++                               true);
++            }
++        }
++    }
++}
+diff --git a/src/Bot/Factory/OngoingGuildRecruit.h b/src/Bot/Factory/OngoingGuildRecruit.h
+new file mode 100644
+index 00000000..3f0d19ac
+--- /dev/null
++++ b/src/Bot/Factory/OngoingGuildRecruit.h
+@@ -0,0 +1,54 @@
++/*
++ * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license, you may redistribute it
++ * and/or modify it under version 3 of the License, or (at your option), any later version.
++ */
++
++#ifndef PLAYERBOTS_ONGOINGGUILDRECRUIT_H
++#define PLAYERBOTS_ONGOINGGUILDRECRUIT_H
++
++#include "ObjectGuid.h"
++
++#include <map>
++#include <mutex>
++#include <utility>
++
++// Ongoing, opportunistic guild recruitment. Where GuildRecruitmentEvent is a
++// one-shot realm-start push (leaders teleport to the newbie areas for ~15 min),
++// this runs for the whole life of the server as normal bot life happens.
++//
++// Every ~AiPlayerbot.OngoingRecruitIntervalSec, each online random bot that
++// FOUNDED a guild (it is the guild's leader) and has a leader / interactive
++// personality opportunistically sends guild invites to nearby unguilded BOTS
++// and to the nearby unguilded real PLAYER, in its own voice. Elite (raid / pvp)
++// guilds only admit bots whose personality is in the guild's fit-set, preserving
++// exactly the purity invariant PersonalityGuildFactory establishes; casual
++// guilds take anyone. The real player is always archetype-eligible and is gated
++// on the recruiter's sentiment toward them.
++//
++// Driven from the same world-thread tick as GuildRecruitmentEvent; cheap when
++// idle (a single map walk, heavy work throttled to the configured interval).
++class OngoingGuildRecruit
++{
++public:
++    static OngoingGuildRecruit& instance();
++
++    // World-thread tick driver; call every world update. Accumulates diff and
++    // does the bot scan + grid searches only once per configured interval.
++    void Update(uint32 diff);
++
++private:
++    OngoingGuildRecruit() = default;
++
++    void Tick();
++
++    uint32 _accumMs = 0;
++
++    // Per-(recruiter, target) last-invite time in ms (getMSTime) so a target is
++    // not re-spammed within AiPlayerbot.OngoingRecruitCooldownMin. Guarded even
++    // though the driver is world-thread only, mirroring the sibling sentiment /
++    // personality caches this collaborates with.
++    std::mutex _mutex;
++    std::map<std::pair<ObjectGuid, ObjectGuid>, uint32> _lastInvite;
++};
++
++#endif
+diff --git a/src/Bot/Factory/PartyGuildFormation.cpp b/src/Bot/Factory/PartyGuildFormation.cpp
+new file mode 100644
+index 00000000..5ccce293
+--- /dev/null
++++ b/src/Bot/Factory/PartyGuildFormation.cpp
+@@ -0,0 +1,551 @@
++/*
++ * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license, you may redistribute it
++ * and/or modify it under version 3 of the License, or (at your option), any later version.
++ */
++
++#include "PartyGuildFormation.h"
++
++#include "Common.h"
++#include "Config.h"
++#include "DatabaseEnv.h"
++#include "Group.h"
++#include "GroupMgr.h"
++#include "GroupScript.h"
++#include "Guild.h"
++#include "GuildMgr.h"
++#include "Log.h"
++#include "ObjectAccessor.h"
++#include "Opcodes.h"
++#include "Player.h"
++#include "PlayerScript.h"
++#include "PlayerbotGuildMgr.h"
++#include "PlayerbotMgr.h"
++#include "Random.h"
++#include "RandomPlayerbotFactory.h"
++#include "RandomPlayerbotMgr.h"
++#include "ScriptMgr.h"
++#include "StringFormat.h"
++#include "Timer.h"
++#include "WorldPacket.h"
++#include "WorldSession.h"
++
++#include <algorithm>
++#include <string>
++#include <unordered_map>
++#include <unordered_set>
++#include <vector>
++
++// Provided by mod-ollama-chat (same binary), weakly optional (null and the call
++// a no-op when the chat module is disabled). Same hooks PersonalityGuildFactory /
++// OngoingGuildRecruit use: a bot SAYS a short in-character line about a concrete
++// situation, and the founder's personality invents the applied guild name.
++[[gnu::weak]] void OllamaChat_SpeakSituation(Player* bot, Player* target, std::string const& situation, bool whisper);
++[[gnu::weak]] void OllamaChat_RenameGuildInVoice(Player* leader, uint32 guildId, std::string const& archetype);
++
++namespace
++{
++    void SpeakSituation(Player* bot, Player* target, std::string const& situation, bool whisper)
++    {
++        if (OllamaChat_SpeakSituation)
++            OllamaChat_SpeakSituation(bot, target, situation, whisper);
++    }
++
++    void RenameGuildInVoice(Player* leader, uint32 guildId, std::string const& archetype)
++    {
++        if (OllamaChat_RenameGuildInVoice)
++            OllamaChat_RenameGuildInVoice(leader, guildId, archetype);
++    }
++
++    // ---- Config (read live, same idiom as the sibling guild factories) -----
++    bool PgEnabled() { return sConfigMgr->GetOption<bool>("AiPlayerbot.PartyGuild.Enabled", true); }
++    uint32 PgMinMinutes() { return sConfigMgr->GetOption<uint32>("AiPlayerbot.PartyGuild.MinMinutes", 5); }
++    float PgBaseChance() { return sConfigMgr->GetOption<float>("AiPlayerbot.PartyGuild.BaseChance", 8.0f); }
++    float PgDeathPenalty() { return sConfigMgr->GetOption<float>("AiPlayerbot.PartyGuild.DeathPenalty", 6.0f); }
++    uint32 PgCheckIntervalSec() { return sConfigMgr->GetOption<uint32>("AiPlayerbot.PartyGuild.CheckIntervalSec", 120); }
++
++    // Outcome-adjusted formation chance: starts at BaseChance, reduced by
++    // DeathPenalty per death, floored at 0. A wipe drives it to 0.
++    float OutcomeChance(uint32 deaths)
++    {
++        float chance = PgBaseChance() - PgDeathPenalty() * float(deaths);
++        return chance < 0.0f ? 0.0f : chance;
++    }
++
++    using PersonalitySet = std::unordered_set<std::string>;
++
++    // Archetype leader sets - a verbatim mirror of PersonalityGuildFactory's
++    // (they live in that file's anonymous namespace), used only to derive the
++    // founder's archetype label for the in-voice guild rename.
++    PersonalitySet const RAID_LEADERS = {"HARDCORE_RAIDLEAD", "THEORYCRAFTER", "MIN_MAXER", "LORE_NERD"};
++    PersonalitySet const PVP_LEADERS  = {"ELITE_ARENA_PVPER", "PVP_TRASHTALKER", "DUELIST", "RAGER"};
++
++    char const* ArchetypeForPersonality(std::string const& personality)
++    {
++        if (RAID_LEADERS.count(personality))
++            return "raid";
++        if (PVP_LEADERS.count(personality))
++            return "pvp";
++        return "casual";
++    }
++
++    // How well a personality suits founding/leading a guild. The six named tiers
++    // come straight from the design; a spread of other recognised leader-ish
++    // personalities score lower; everything else scores 0 (no leader fit).
++    uint32 LeaderScore(std::string const& personality)
++    {
++        static std::unordered_map<std::string, uint32> const kScores = {
++            {"GUILD_RECRUITER", 100}, {"HEROIC_LEADER", 90}, {"HARDCORE_RAIDLEAD", 85},
++            {"MENTOR", 80},           {"WOW_MOM", 75},       {"ELITE_ARENA_PVPER", 70},
++            {"LFG_SPAMMER", 65},      {"CHILL_DAD", 60},     {"THEORYCRAFTER", 60},
++            {"JOLLY_BEER_LOVER", 55}, {"MIN_MAXER", 50},     {"LORE_NERD", 45},
++            {"DUELIST", 40},          {"PVP_TRASHTALKER", 40}, {"RAGER", 30},
++        };
++        auto it = kScores.find(personality);
++        return it != kScores.end() ? it->second : 0;
++    }
++
++    // guid -> mod-ollama-chat personality from the shared characters DB, guid-
++    // cached; empty results retried after 5 min. Mirrors OngoingGuildRecruit's
++    // GetPersonality exactly.
++    std::string GetPersonality(ObjectGuid guid)
++    {
++        static int hasTable = -1;
++        if (hasTable == -1)
++            hasTable = CharacterDatabase.Query(
++                          "SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() "
++                          "AND TABLE_NAME = 'mod_ollama_chat_personality'")
++                          ? 1
++                          : 0;
++        if (!hasTable)
++            return "";
++
++        ObjectGuid::LowType const low = guid.GetCounter();
++        uint32 const now = getMSTime();
++        static std::mutex cacheMutex;
++        static std::map<ObjectGuid::LowType, std::pair<std::string, uint32>> cache;
++        {
++            std::lock_guard<std::mutex> lock(cacheMutex);
++            auto it = cache.find(low);
++            if (it != cache.end() &&
++                (!it->second.first.empty() || now - it->second.second < 5 * MINUTE * IN_MILLISECONDS))
++                return it->second.first;
++        }
++
++        std::string personality;
++        if (QueryResult result = CharacterDatabase.Query(
++                "SELECT personality FROM mod_ollama_chat_personality WHERE guid = {}", low))
++            personality = (*result)[0].Get<std::string>();
++
++        std::lock_guard<std::mutex> lock(cacheMutex);
++        cache[low] = {personality, now};
++        return personality;
++    }
++
++    bool IsBotMember(Player* member) { return sPlayerbotsMgr.GetPlayerbotAI(member) != nullptr; }
++
++    // The online members of a group, resolved to live Player pointers (offline
++    // slots skipped). Used for qualification, founder pick, death routing.
++    std::vector<Player*> OnlineMembers(Group* group)
++    {
++        std::vector<Player*> members;
++        if (!group)
++            return members;
++        for (auto const& slot : group->GetMemberSlots())
++            if (Player* p = ObjectAccessor::FindPlayer(slot.guid))
++                members.push_back(p);
++        return members;
++    }
++
++    // A "party" = a group with a non-bot player member AND at least one random
++    // bot member. (Both evaluated over the currently-online members.)
++    bool PartyQualifies(Group* group)
++    {
++        bool hasRealPlayer = false;
++        bool hasRandomBot = false;
++        for (Player* member : OnlineMembers(group))
++        {
++            if (!IsBotMember(member))
++                hasRealPlayer = true;
++            else if (sRandomPlayerbotMgr.IsRandomBot(member))
++                hasRandomBot = true;
++        }
++        return hasRealPlayer && hasRandomBot;
++    }
++
++    // Queue a CMSG_GUILD_INVITE on the founder's session for `target` - exactly
++    // OngoingGuildRecruit::SendGuildInvite / GuildRecruitmentEvent::SendGuildInvite.
++    // A BOT target's own "guild invite" handler auto-accepts; a real player gets
++    // the dialog and chooses.
++    void SendGuildInvite(Player* founder, Player* target)
++    {
++        WorldSession* session = founder->GetSession();
++        if (!session)
++            return;
++
++        WorldPacket* data = new WorldPacket(CMSG_GUILD_INVITE);
++        *data << target->GetName();
++        session->QueuePacket(data);
++    }
++}  // namespace
++
++PartyGuildFormation& PartyGuildFormation::instance()
++{
++    static PartyGuildFormation instance;
++    return instance;
++}
++
++void PartyGuildFormation::OnPartyChanged(Group* group)
++{
++    if (!PgEnabled() || !group)
++        return;
++
++    ObjectGuid const key = group->GetGUID();
++    bool const qualifies = PartyQualifies(group);
++
++    std::lock_guard<std::mutex> lock(_mutex);
++    auto it = _parties.find(key);
++    if (qualifies)
++    {
++        if (it == _parties.end())
++        {
++            PartyState state;
++            state.startMs = getMSTime();
++            _parties.emplace(key, state);  // fresh party - start its clock
++        }
++        // Already tracked: keep the original start time / counters.
++    }
++    else if (it != _parties.end() && !it->second.formed)
++    {
++        _parties.erase(it);  // stopped qualifying before it formed - forget it
++    }
++}
++
++void PartyGuildFormation::OnPartyDisband(ObjectGuid groupGuid)
++{
++    std::lock_guard<std::mutex> lock(_mutex);
++    _parties.erase(groupGuid);
++}
++
++void PartyGuildFormation::OnMemberDeath(Player* member)
++{
++    if (!PgEnabled() || !member)
++        return;
++
++    Group* group = member->GetGroup();
++    if (!group)
++        return;
++
++    std::lock_guard<std::mutex> lock(_mutex);
++    auto it = _parties.find(group->GetGUID());
++    if (it != _parties.end() && !it->second.formed)
++        ++it->second.deaths;
++}
++
++void PartyGuildFormation::OnMemberQuestComplete(Player* member)
++{
++    if (!PgEnabled() || !member)
++        return;
++
++    Group* group = member->GetGroup();
++    if (!group)
++        return;
++
++    std::lock_guard<std::mutex> lock(_mutex);
++    auto it = _parties.find(group->GetGUID());
++    if (it != _parties.end() && !it->second.formed)
++        ++it->second.questCompletions;
++}
++
++void PartyGuildFormation::Update(uint32 diff)
++{
++    if (!PgEnabled())
++        return;
++
++    uint32 const intervalMs = PgCheckIntervalSec() * IN_MILLISECONDS;
++    if (intervalMs == 0)
++        return;
++
++    _accumMs += diff;
++    if (_accumMs < intervalMs)
++        return;
++    _accumMs = 0;
++
++    uint32 const minMs = PgMinMinutes() * MINUTE * IN_MILLISECONDS;
++    uint32 const now = getMSTime();
++
++    // Snapshot the groups that pass the gate + random roll under the lock, then
++    // do the (heavier) forming outside it. Also reap entries whose group is gone.
++    std::vector<ObjectGuid> toForm;
++    std::vector<ObjectGuid> toErase;
++    {
++        std::lock_guard<std::mutex> lock(_mutex);
++        for (auto const& kv : _parties)
++        {
++            if (kv.second.formed)
++                continue;
++
++            Group* group = sGroupMgr->GetGroupByGUID(kv.first.GetCounter());
++            if (!group)
++            {
++                toErase.push_back(kv.first);
++                continue;
++            }
++            if (now - kv.second.startMs < minMs)
++                continue;
++
++            if (roll_chance_f(OutcomeChance(kv.second.deaths)))
++                toForm.push_back(kv.first);
++        }
++        for (ObjectGuid const& guid : toErase)
++            _parties.erase(guid);
++    }
++
++    for (ObjectGuid const& guid : toForm)
++        if (Group* group = sGroupMgr->GetGroupByGUID(guid.GetCounter()))
++            TryForm(group, /*playerInitiated=*/false);
++}
++
++void PartyGuildFormation::OnPlayerRequest(Player* player)
++{
++    if (!PgEnabled() || !player)
++        return;
++
++    Group* group = player->GetGroup();
++    if (!group)
++        return;
++
++    // Only act if this group is a tracked qualifying party (has bots to answer).
++    uint32 deaths = 0;
++    uint32 startMs = 0;
++    {
++        std::lock_guard<std::mutex> lock(_mutex);
++        auto it = _parties.find(group->GetGUID());
++        if (it == _parties.end() || it->second.formed)
++            return;
++        deaths = it->second.deaths;
++        startMs = it->second.startMs;
++    }
++
++    uint32 const minMs = PgMinMinutes() * MINUTE * IN_MILLISECONDS;
++    bool const oldEnough = (getMSTime() - startMs) >= minMs;
++    bool const notWiped = OutcomeChance(deaths) > 0.0f;
++
++    // Initiation bypasses the random roll but keeps the >= MinMinutes + not-wiped
++    // gate. If it passes, form now; otherwise a party bot declines in-voice.
++    if (oldEnough && notWiped)
++    {
++        TryForm(group, /*playerInitiated=*/true);
++        return;
++    }
++
++    // Pick a random bot member to voice the decline.
++    Player* speaker = nullptr;
++    for (Player* member : OnlineMembers(group))
++    {
++        if (IsBotMember(member))
++        {
++            speaker = member;
++            break;
++        }
++    }
++    if (!speaker)
++        return;
++
++    if (!oldEnough)
++        SpeakSituation(speaker, nullptr,
++                       "a groupmate suggested your party form a guild, but you've only just met - gently say give it "
++                       "time",
++                       false);
++    else  // wiped
++        SpeakSituation(speaker, nullptr,
++                       "a groupmate suggested your party form a guild right after a rough run full of deaths - say "
++                       "maybe later",
++                       false);
++}
++
++bool PartyGuildFormation::TryForm(Group* group, bool playerInitiated)
++{
++    if (!group)
++        return false;
++
++    ObjectGuid const key = group->GetGUID();
++
++    // Claim the party (guard against double-create) and read its death count.
++    uint32 deaths = 0;
++    {
++        std::lock_guard<std::mutex> lock(_mutex);
++        auto it = _parties.find(key);
++        if (it == _parties.end() || it->second.formed)
++            return false;
++        deaths = it->second.deaths;
++        it->second.formed = true;  // world-thread only, but claim before we build
++    }
++
++    auto unclaim = [&]()
++    {
++        std::lock_guard<std::mutex> lock(_mutex);
++        auto it = _parties.find(key);
++        if (it != _parties.end())
++            it->second.formed = false;
++    };
++
++    std::vector<Player*> const members = OnlineMembers(group);
++
++    // INVARIANT: don't form if the crew is already guilded together (the real
++    // player and any bot already share a guild).
++    Player* realPlayer = nullptr;
++    for (Player* member : members)
++        if (!IsBotMember(member))
++        {
++            realPlayer = member;
++            break;
++        }
++    if (realPlayer && realPlayer->GetGuildId())
++    {
++        for (Player* member : members)
++            if (member != realPlayer && member->GetGuildId() == realPlayer->GetGuildId())
++            {
++                unclaim();
++                return false;  // already in one guild together
++            }
++    }
++
++    // FOUNDER = the best guild-leader personality among the GUILDLESS bot members
++    // (a founder must be guildless or CreateGuild fails). Best score wins; if none
++    // scores, the top guildless bot still founds - it's the player's chosen crew.
++    Player* founder = nullptr;
++    uint32 bestScore = 0;
++    std::string founderPersonality;
++    for (Player* member : members)
++    {
++        if (!IsBotMember(member) || member->GetGuildId())
++            continue;
++
++        std::string const personality = GetPersonality(member->GetGUID());
++        uint32 const score = LeaderScore(personality);
++        if (!founder || score > bestScore)
++        {
++            founder = member;
++            bestScore = score;
++            founderPersonality = personality;
++        }
++    }
++    if (!founder)
++    {
++        unclaim();
++        return false;  // no guildless bot to found the guild
++    }
++
++    // Start with a random unused pool name; the founder's LLM voice renames it.
++    std::string const initialName = RandomPlayerbotFactory::CreateRandomGuildName();
++    if (initialName.empty() || !PlayerbotGuildMgr::instance().CreateGuild(founder, initialName))
++    {
++        LOG_ERROR("playerbots", "[PartyGuild] failed to create guild (founder {})", founder->GetName());
++        unclaim();
++        return false;
++    }
++
++    Guild* guild = sGuildMgr->GetGuildByName(initialName);
++    if (!guild)
++    {
++        unclaim();
++        return false;
++    }
++
++    // Suggest names in party chat first (1-2 bots) so the player sees ideas; the
++    // founder's async LLM rename is the one actually applied.
++    uint32 suggested = 0;
++    for (Player* member : members)
++    {
++        if (suggested >= 2)
++            break;
++        if (member == founder || !IsBotMember(member))
++            continue;
++        SpeakSituation(member, nullptr,
++                       "your party had a great run together and is forming a guild - suggest a cool guild name", false);
++        ++suggested;
++    }
++
++    // Invite EVERY other party member: bots (auto-accept) and the real player
++    // (their choice). Intentional elite-purity exception - this is the player's
++    // chosen crew, so invite regardless of personality fit.
++    for (Player* member : members)
++    {
++        if (member == founder)
++            continue;
++        if (member->GetGuildId())
++            continue;  // already guilded elsewhere - can't join a second
++        SendGuildInvite(founder, member);
++    }
++
++    PlayerbotGuildMgr::instance().OnGuildUpdate(guild);
++
++    // Founder's personality invents + applies the real guild name (async).
++    RenameGuildInVoice(founder, guild->GetId(), ArchetypeForPersonality(founderPersonality));
++
++    LOG_INFO("playerbots", "[PartyGuild] party of {} formed guild (founder {} {}, {} deaths, {})", members.size(),
++             founder->GetName(), founderPersonality.empty() ? "no-personality" : founderPersonality, deaths,
++             playerInitiated ? "player-initiated" : "spontaneous");
++    return true;
++}
++
++// ---------------------------------------------------------------------------
++// Weak-symbol entry point for mod-ollama-chat's party-chat "let's guild up"
++// intent. Plain global (external linkage) so the module's `[[gnu::weak]]` extern
++// binds to it. World thread (called synchronously from the chat handler).
++// ---------------------------------------------------------------------------
++void PartyGuild_OnPlayerRequest(Player* player)
++{
++    PartyGuildFormation::instance().OnPlayerRequest(player);
++}
++
++// ---------------------------------------------------------------------------
++// Scripts that feed the singleton. GroupScript membership changes maintain the
++// party registry; the PlayerScript counts member deaths / quest completions.
++// Empty enabled-hook lists (all hooks on) mirror mod-ollama-chat's SentimentOnGroup
++// GroupScript and ChatOnDeath PlayerScript, which use the same OnAddMember /
++// OnPlayerJustDied hooks in this fork.
++// ---------------------------------------------------------------------------
++class PartyGuildGroupScript : public GroupScript
++{
++public:
++    PartyGuildGroupScript() : GroupScript("PartyGuildGroupScript") {}
++
++    void OnCreate(Group* group, Player* /*leader*/) override { PartyGuildFormation::instance().OnPartyChanged(group); }
++
++    void OnAddMember(Group* group, ObjectGuid /*guid*/) override
++    {
++        PartyGuildFormation::instance().OnPartyChanged(group);
++    }
++
++    void OnRemoveMember(Group* group, ObjectGuid /*guid*/, RemoveMethod /*method*/, ObjectGuid /*kicker*/,
++                        char const* /*reason*/) override
++    {
++        PartyGuildFormation::instance().OnPartyChanged(group);
++    }
++
++    void OnDisband(Group* group) override
++    {
++        if (group)
++            PartyGuildFormation::instance().OnPartyDisband(group->GetGUID());
++    }
++};
++
++class PartyGuildPlayerScript : public PlayerScript
++{
++public:
++    PartyGuildPlayerScript() : PlayerScript("PartyGuildPlayerScript") {}
++
++    void OnPlayerJustDied(Player* player) override { PartyGuildFormation::instance().OnMemberDeath(player); }
++
++    void OnPlayerCompleteQuest(Player* player, Quest const* /*quest*/) override
++    {
++        PartyGuildFormation::instance().OnMemberQuestComplete(player);
++    }
++};
++
++void AddSC_PartyGuildFormation()
++{
++    new PartyGuildGroupScript();
++    new PartyGuildPlayerScript();
++}
+diff --git a/src/Bot/Factory/PartyGuildFormation.h b/src/Bot/Factory/PartyGuildFormation.h
+new file mode 100644
+index 00000000..1069007f
+--- /dev/null
++++ b/src/Bot/Factory/PartyGuildFormation.h
+@@ -0,0 +1,90 @@
++/*
++ * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license, you may redistribute it
++ * and/or modify it under version 3 of the License, or (at your option), any later version.
++ */
++
++#ifndef PLAYERBOTS_PARTYGUILDFORMATION_H
++#define PLAYERBOTS_PARTYGUILDFORMATION_H
++
++#include "ObjectGuid.h"
++
++#include <map>
++#include <mutex>
++
++class Group;
++class Player;
++
++// Emergent PARTY -> GUILD formation.
++//
++// Every GROUP that contains the real player and at least one random bot (a
++// "party") is tracked from the moment it qualifies: its start time and the
++// number of member deaths during its life (quest completions too, for flavor).
++// When such a party has been alive long enough and the run went WELL, it can
++// spontaneously become a guild founded by its most leader-suited bot, which
++// then invites the whole crew (bots auto-accept; the real player chooses).
++//
++// Two trigger paths:
++//   (1) SPONTANEOUS - a periodic world-thread tick rolls an outcome-adjusted
++//       chance (starts at PartyGuild.BaseChance, minus PartyGuild.DeathPenalty
++//       per death); a clean, long-lived party is far likelier than a wiped one.
++//   (2) PLAYER-INITIATED - the real player says a "let's guild up" line in party
++//       chat; mod-ollama-chat routes it here via the weak PartyGuild_OnPlayerRequest
++//       symbol. Initiation bypasses the random roll but still requires the
++//       >= MinMinutes + not-wiped gate; otherwise a party bot answers in-voice.
++//
++// All state lives in a single world-thread-driven singleton. The GroupScript
++// and PlayerScript that feed it are registered from AddPlayerbotsScripts().
++class PartyGuildFormation
++{
++public:
++    static PartyGuildFormation& instance();
++
++    // --- GroupScript feed (world thread) ---------------------------------
++    // Re-evaluate a group's membership: register it the moment it becomes a
++    // qualifying party, or drop an un-formed entry that stopped qualifying.
++    void OnPartyChanged(Group* group);
++    // Forget a disbanded group entirely (clears any registry state).
++    void OnPartyDisband(ObjectGuid groupGuid);
++
++    // --- PlayerScript feed (world thread) --------------------------------
++    // Count a member death against the party the dead member belongs to.
++    void OnMemberDeath(Player* member);
++    // Count a member quest completion (flavor only; not used in the odds).
++    void OnMemberQuestComplete(Player* member);
++
++    // --- Drivers ----------------------------------------------------------
++    // World-thread spontaneous tick; call every world update.
++    void Update(uint32 diff);
++    // Player-initiated path (invoked from mod-ollama-chat's party-chat intent).
++    void OnPlayerRequest(Player* player);
++
++private:
++    PartyGuildFormation() = default;
++
++    struct PartyState
++    {
++        uint32 startMs = 0;            // getMSTime() when the party first qualified
++        uint32 deaths = 0;             // member deaths during the party's life
++        uint32 questCompletions = 0;   // member quest completions (flavor)
++        bool formed = false;           // guard against double-forming one group
++    };
++
++    // Attempt to actually found the guild for `group` (founder pick + create +
++    // invites + async name). Returns true on success; sets the party formed.
++    bool TryForm(Group* group, bool playerInitiated);
++
++    std::mutex _mutex;                            // sibling-consistent guard
++    std::map<ObjectGuid, PartyState> _parties;    // group GUID -> tracked state
++    uint32 _accumMs = 0;                          // spontaneous-tick accumulator
++};
++
++// Plain global (external linkage) so mod-ollama-chat's `[[gnu::weak]]` extern
++// binds to it in the same binary. Routes a real player's party-chat "let's
++// guild up" line to the player-initiated formation path.
++void PartyGuild_OnPlayerRequest(Player* player);
++
++// Registration entry (AddSC-style). Registers the GroupScript + PlayerScript
++// that feed the singleton; call from AddPlayerbotsScripts().
++void AddSC_PartyGuildFormation();
++
++#endif
 diff --git a/src/Bot/Factory/PersonalityGuildFactory.cpp b/src/Bot/Factory/PersonalityGuildFactory.cpp
 new file mode 100644
-index 00000000..ba3f09ea
+index 00000000..366bd357
 --- /dev/null
 +++ b/src/Bot/Factory/PersonalityGuildFactory.cpp
-@@ -0,0 +1,376 @@
+@@ -0,0 +1,380 @@
 +/*
 + * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license, you may redistribute it
 + * and/or modify it under version 3 of the License, or (at your option), any later version.
@@ -1605,11 +2748,11 @@ index 00000000..ba3f09ea
 +
 +#include "PersonalityGuildFactory.h"
 +
++#include "Common.h"
 +#include "Config.h"
 +#include "DatabaseEnv.h"
 +#include "Guild.h"
 +#include "GuildMgr.h"
-+#include "GuildRecruitmentEvent.h"
 +#include "Log.h"
 +#include "ObjectAccessor.h"
 +#include "Player.h"
@@ -1617,6 +2760,7 @@ index 00000000..ba3f09ea
 +#include "PlayerbotGuildMgr.h"
 +#include "Random.h"
 +#include "RandomPlayerbotFactory.h"
++#include "RandomPlayerbotMgr.h"
 +#include "StringFormat.h"
 +
 +#include <algorithm>
@@ -1779,154 +2923,148 @@ index 00000000..ba3f09ea
 +
 +void PersonalityGuildFactory::FormPersonalityGuilds()
 +{
-+    static bool formed = false;
-+    if (formed)
++    // Seed the world with a few guilds at startup; the rest emerge gradually via
++    // UpdateEmergentFounding + the ongoing recruiter. Runs at most once per process.
++    static bool seeded = false;
++    if (seeded)
 +        return;
-+    formed = true;
++    seeded = true;
 +
++    uint32 const seedCount = sConfigMgr->GetOption<uint32>("AiPlayerbot.PersonalityGuild.SeedCount", 2);
++
++    uint32 formed = 0;
++    for (uint32 i = 0; i < seedCount; ++i)
++        if (TryFoundOneGuild())
++            ++formed;
++
++    LOG_INFO("playerbots", "[PersonalityGuild] Seeded {} of {} initial guilds; the rest form over time", formed,
++             seedCount);
++}
++
++bool PersonalityGuildFactory::TryFoundOneGuild()
++{
 +    uint32 const raidCount = sConfigMgr->GetOption<uint32>("AiPlayerbot.PersonalityGuild.RaidCount", 4);
 +    uint32 const pvpCount = sConfigMgr->GetOption<uint32>("AiPlayerbot.PersonalityGuild.PvpCount", 3);
 +    uint32 const casualCount = sConfigMgr->GetOption<uint32>("AiPlayerbot.PersonalityGuild.CasualCount", 8);
 +    uint32 const leaderMinLevel = sConfigMgr->GetOption<uint32>("AiPlayerbot.PersonalityGuild.LeaderMinLevel", 10);
 +    float const casualJoinChance = sConfigMgr->GetOption<float>("AiPlayerbot.PersonalityGuild.CasualJoinChance", 40.0f);
 +    uint32 const maxMembers = std::max<uint32>(2, sPlayerbotAIConfig.randomBotGuildSizeMax);
++    uint32 const foundInitial = sConfigMgr->GetOption<uint32>("AiPlayerbot.PersonalityGuild.FoundInitialMembers", 4);
++    uint32 const initialCap = std::min(std::max<uint32>(1, foundInitial), maxMembers);
 +
-+    if (raidCount + pvpCount + casualCount == 0)
-+        return;
-+
++    // Fresh snapshot of the CURRENT online, guildless random bots + personalities
++    // (self-contained, like OngoingGuildRecruit::Tick - no captured batch state).
 +    std::unordered_map<uint32, std::string> personalities;
 +    LoadPersonalities(personalities);
 +
 +    std::vector<Candidate> pool;
 +    LoadOnlineGuildlessBots(pool, personalities);
 +    if (pool.empty())
++        return false;
++
++    // Archetype preference weighted by the configured Raid:Pvp:Casual mix (defaults
++    // ~1:1:2). Build a fallback order so the tick still founds something when the
++    // primary archetype has no eligible leader online right now.
++    uint32 weights[3] = {raidCount, pvpCount, casualCount};
++    uint32 total = weights[0] + weights[1] + weights[2];
++    if (total == 0)
 +    {
-+        LOG_INFO("playerbots",
-+                 "[PersonalityGuild] No online guildless bots available; skipping personality guild formation");
-+        return;
++        weights[0] = 1;
++        weights[1] = 1;
++        weights[2] = 2;
++        total = 4;
 +    }
 +
-+    // Bots that have been placed (as leader or member) or are otherwise unusable.
-+    std::unordered_set<uint32> committed;
-+
-+    // Freshly-formed guild leaders (guid + archetype), handed to the realm-start
-+    // recruitment event once all guilds are formed.
-+    std::vector<std::pair<ObjectGuid, std::string>> recruitLeaders;
-+
-+    // Finds the first usable leader for an archetype; marks unusable candidates
-+    // committed so they are not reconsidered. Returns nullptr if none remain.
-+    auto findLeader = [&](PersonalitySet const& leaderSet, Candidate& outLeader) -> Player*
++    uint32 roll = urand(0, total - 1);
++    uint32 primary = 0;
++    for (; primary < 2; ++primary)  // last bucket (casual) is the default remainder
 +    {
++        if (roll < weights[primary])
++            break;
++        roll -= weights[primary];
++    }
++
++    GuildArchetype const archetypes[3] = {GuildArchetype::Raid, GuildArchetype::Pvp, GuildArchetype::Casual};
++    std::vector<GuildArchetype> order;
++    order.push_back(archetypes[primary]);
++    for (uint32 i = 0; i < 3; ++i)
++        if (i != primary)
++            order.push_back(archetypes[i]);
++
++    for (GuildArchetype const archetype : order)
++    {
++        PersonalitySet const* leaderSet = &CASUAL_LEADERS;
++        PersonalitySet const* fitSet = nullptr;  // casual: any personality fits
++        switch (archetype)
++        {
++            case GuildArchetype::Raid:
++                leaderSet = &RAID_LEADERS;
++                fitSet = &RAID_FIT;
++                break;
++            case GuildArchetype::Pvp:
++                leaderSet = &PVP_LEADERS;
++                fitSet = &PVP_FIT;
++                break;
++            default:
++                break;
++        }
++        bool const casual = (fitSet == nullptr);
++
++        // Find an eligible ONLINE guildless leader whose personality fits this
++        // archetype's leader set and meets the minimum level.
++        Candidate leader;
++        Player* leaderPlayer = nullptr;
 +        for (Candidate const& candidate : pool)
 +        {
-+            if (committed.count(candidate.lowGuid) || candidate.level < leaderMinLevel ||
-+                !leaderSet.count(candidate.personality))
++            if (candidate.level < leaderMinLevel || !leaderSet->count(candidate.personality))
 +                continue;
 +
 +            Player* player = ObjectAccessor::FindConnectedPlayer(candidate.guid);
 +            if (!player || player->GetGuildId())
-+            {
-+                committed.insert(candidate.lowGuid);  // stale/guilded: never reconsider
 +                continue;
-+            }
 +
-+            outLeader = candidate;
-+            return player;
++            leader = candidate;
++            leaderPlayer = player;
++            break;
 +        }
-+        return nullptr;
-+    };
-+
-+    // Elite guild: leader from leaderSet, members strictly from fitSet, same
-+    // faction, no randomness. Returns false when no leader is available.
-+    auto formEliteGuild = [&](GuildArchetype archetype, PersonalitySet const& leaderSet,
-+                              PersonalitySet const& fitSet) -> bool
-+    {
-+        Candidate leader;
-+        Player* leaderPlayer = findLeader(leaderSet, leader);
 +        if (!leaderPlayer)
-+            return false;
++            continue;  // no eligible leader for this archetype - try the next
 +
 +        std::string name = MakeThemedName(archetype);
 +        if (name.empty())
-+            return false;
++            continue;
 +
 +        if (!PlayerbotGuildMgr::instance().CreateGuild(leaderPlayer, name))
 +        {
-+            LOG_ERROR("playerbots", "[PersonalityGuild] Failed to create {} guild '{}' led by {}",
++            LOG_ERROR("playerbots", "[EmergentGuild] Failed to create {} guild '{}' led by {}",
 +                      ArchetypeName(archetype), name, leaderPlayer->GetName());
-+            return false;
++            continue;
 +        }
-+        committed.insert(leader.lowGuid);
 +
++        // Seed a SMALL guild (headroom stays for the ongoing recruiter to grow it
++        // and for the real player to join). Never exceed maxMembers. Elite: strictly
++        // fit-set, same faction. Casual: any same-faction bot, admitted with chance.
 +        uint32 memberCount = 1;  // leader
 +        Guild* guild = sGuildMgr->GetGuildByName(name);
 +        if (guild)
 +        {
++            std::unordered_set<uint32> committed;
++            committed.insert(leader.lowGuid);
 +            for (Candidate const& candidate : pool)
 +            {
-+                if (memberCount >= maxMembers)
-+                    break;
-+                if (committed.count(candidate.lowGuid) || candidate.team != leader.team ||
-+                    !fitSet.count(candidate.personality))
-+                    continue;
-+
-+                Player* member = ObjectAccessor::FindConnectedPlayer(candidate.guid);
-+                if (!member || member->GetGuildId())
-+                {
-+                    committed.insert(candidate.lowGuid);
-+                    continue;
-+                }
-+
-+                if (guild->AddMember(candidate.guid, uint8(urand(GR_OFFICER, GR_INITIATE))))
-+                {
-+                    committed.insert(candidate.lowGuid);
-+                    ++memberCount;
-+                }
-+            }
-+            PlayerbotGuildMgr::instance().OnGuildUpdate(guild);
-+        }
-+
-+        LOG_INFO("playerbots", "[PersonalityGuild] Formed {} guild '{}' led by {} ({}) with {} members",
-+                 ArchetypeName(archetype), name, leaderPlayer->GetName(), leader.personality, memberCount);
-+        if (guild)
-+            SpeakGuildName(leaderPlayer, guild->GetId(), ArchetypeName(archetype));
-+        recruitLeaders.emplace_back(leaderPlayer->GetGUID(), ArchetypeName(archetype));
-+        return true;
-+    };
-+
-+    // Casual guild: leader from CASUAL_LEADERS, members are any remaining
-+    // (non-elite-committed) same-faction bot, admitted with randomness.
-+    auto formCasualGuild = [&]() -> bool
-+    {
-+        Candidate leader;
-+        Player* leaderPlayer = findLeader(CASUAL_LEADERS, leader);
-+        if (!leaderPlayer)
-+            return false;
-+
-+        std::string name = MakeThemedName(GuildArchetype::Casual);
-+        if (name.empty())
-+            return false;
-+
-+        if (!PlayerbotGuildMgr::instance().CreateGuild(leaderPlayer, name))
-+        {
-+            LOG_ERROR("playerbots", "[PersonalityGuild] Failed to create casual guild '{}' led by {}", name,
-+                      leaderPlayer->GetName());
-+            return false;
-+        }
-+        committed.insert(leader.lowGuid);
-+
-+        uint32 memberCount = 1;  // leader
-+        Guild* guild = sGuildMgr->GetGuildByName(name);
-+        if (guild)
-+        {
-+            for (Candidate const& candidate : pool)
-+            {
-+                if (memberCount >= maxMembers)
++                if (memberCount >= initialCap)
 +                    break;
 +                if (committed.count(candidate.lowGuid) || candidate.team != leader.team)
 +                    continue;
-+                if (!roll_chance_f(casualJoinChance))  // randomness: everyone else may roll in
-+                    continue;
++                if (casual)
++                {
++                    if (!roll_chance_f(casualJoinChance))  // randomness: anyone may roll in
++                        continue;
++                }
++                else if (!fitSet->count(candidate.personality))
++                {
++                    continue;  // elite purity: fit-set only
++                }
 +
 +                Player* member = ObjectAccessor::FindConnectedPlayer(candidate.guid);
 +                if (!member || member->GetGuildId())
@@ -1942,44 +3080,53 @@ index 00000000..ba3f09ea
 +                }
 +            }
 +            PlayerbotGuildMgr::instance().OnGuildUpdate(guild);
++            SpeakGuildName(leaderPlayer, guild->GetId(), ArchetypeName(archetype));
 +        }
 +
-+        LOG_INFO("playerbots", "[PersonalityGuild] Formed casual guild '{}' led by {} ({}) with {} members", name,
-+                 leaderPlayer->GetName(), leader.personality, memberCount);
-+        if (guild)
-+            SpeakGuildName(leaderPlayer, guild->GetId(), ArchetypeName(GuildArchetype::Casual));
-+        recruitLeaders.emplace_back(leaderPlayer->GetGUID(), ArchetypeName(GuildArchetype::Casual));
++        LOG_INFO("playerbots", "[EmergentGuild] founded {} guild '{}' led by {} ({})", ArchetypeName(archetype), name,
++                 leaderPlayer->GetName(), leader.personality);
 +        return true;
-+    };
++    }
 +
-+    uint32 raidFormed = 0;
-+    for (; raidFormed < raidCount; ++raidFormed)
-+        if (!formEliteGuild(GuildArchetype::Raid, RAID_LEADERS, RAID_FIT))
-+            break;
++    return false;
++}
 +
-+    uint32 pvpFormed = 0;
-+    for (; pvpFormed < pvpCount; ++pvpFormed)
-+        if (!formEliteGuild(GuildArchetype::Pvp, PVP_LEADERS, PVP_FIT))
-+            break;
++void PersonalityGuildFactory::UpdateEmergentFounding(uint32 diff)
++{
++    uint32 const intervalMs =
++        sConfigMgr->GetOption<uint32>("AiPlayerbot.PersonalityGuild.FoundIntervalSec", 300) * IN_MILLISECONDS;
++    if (intervalMs == 0)
++        return;
 +
-+    uint32 casualFormed = 0;
-+    for (; casualFormed < casualCount; ++casualFormed)
-+        if (!formCasualGuild())
-+            break;
++    // World-thread only (PlayerbotsWorldScript::OnUpdate) - a plain static suffices.
++    static uint32 accumMs = 0;
++    accumMs += diff;
++    if (accumMs < intervalMs)
++        return;
++    accumMs = 0;
 +
-+    LOG_INFO("playerbots", "[PersonalityGuild] Formation complete: {} raid, {} pvp, {} casual guilds", raidFormed,
-+             pvpFormed, casualFormed);
++    uint32 const targetCount = sConfigMgr->GetOption<uint32>("AiPlayerbot.PersonalityGuild.TargetCount", 12);
 +
-+    // Realm-start experience: send the new guild leaders out to recruit fresh
-+    // real players at the starting areas. No-op unless this is a fresh realm.
-+    GuildRecruitmentEvent::instance().Begin(recruitLeaders);
++    // Count distinct random-bot guilds (every guild an online random bot belongs
++    // to). Cheap, and mirrors the ongoing recruiter's bot-pool walk.
++    std::unordered_set<uint32> guildIds;
++    for (auto const& kv : sRandomPlayerbotMgr.GetAllBots())
++    {
++        Player* bot = kv.second;
++        if (bot && bot->GetGuildId())
++            guildIds.insert(bot->GetGuildId());
++    }
++    if (guildIds.size() >= targetCount)
++        return;
++
++    TryFoundOneGuild();
 +}
 diff --git a/src/Bot/Factory/PersonalityGuildFactory.h b/src/Bot/Factory/PersonalityGuildFactory.h
 new file mode 100644
-index 00000000..3e14b9ee
+index 00000000..7bf85780
 --- /dev/null
 +++ b/src/Bot/Factory/PersonalityGuildFactory.h
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,39 @@
 +/*
 + * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license, you may redistribute it
 + * and/or modify it under version 3 of the License, or (at your option), any later version.
@@ -1988,15 +3135,34 @@ index 00000000..3e14b9ee
 +#ifndef PLAYERBOTS_PERSONALITYGUILDFACTORY_H
 +#define PLAYERBOTS_PERSONALITYGUILDFACTORY_H
 +
++#include "Define.h"
++
 +class PersonalityGuildFactory
 +{
 +public:
-+    // Forms themed, personality-driven guilds (raid / pvp / casual) from the
-+    // pool of currently-online, guildless random bots. Leaders and elite
-+    // membership are picked by mod-ollama-chat personality; casual guilds take
-+    // the remainder with randomness. Runs at most once per server process
-+    // (guarded internally), so it is safe to call from a bot-login hook.
++    // Seeds the world with a few personality guilds at startup (AiPlayerbot.
++    // PersonalityGuild.SeedCount), then leaves the rest to emerge over time. Runs
++    // at most once per server process (guarded internally), so it is safe to call
++    // from a bot-login hook.
 +    static void FormPersonalityGuilds();
++
++    // Founds ONE themed, personality-driven guild (raid / pvp / casual) on demand
++    // from a FRESH snapshot of the currently-online, guildless random bots. Picks
++    // an archetype weighted by the configured Raid:Pvp:Casual mix, finds an online
++    // guildless leader whose mod-ollama-chat personality is in that archetype's
++    // leader set (>= LeaderMinLevel), creates the guild, then seeds it SMALL (up to
++    // FoundInitialMembers members): elite guilds admit only fit-set same-faction
++    // bots, casual guilds admit any same-faction bot with a join chance. The
++    // ongoing recruiter grows it the rest of the way and lets the real player join.
++    // Returns false if no eligible leader is online. Self-contained; safe to call
++    // repeatedly from a world tick.
++    static bool TryFoundOneGuild();
++
++    // World-thread tick driver for emergent formation: every AiPlayerbot.
++    // PersonalityGuild.FoundIntervalSec, founds one more guild while the number of
++    // random-bot guilds is below AiPlayerbot.PersonalityGuild.TargetCount. Call
++    // every world update.
++    static void UpdateEmergentFounding(uint32 diff);
 +};
 +
 +#endif
@@ -2099,22 +3265,34 @@ index fa8a10de..eb47fb6f 100644
      uint32 tweakValue;  // Debugging config
  
 diff --git a/src/Script/Playerbots.cpp b/src/Script/Playerbots.cpp
-index e9abd5b7..59f1f5c6 100644
+index e9abd5b7..9974cb2b 100644
 --- a/src/Script/Playerbots.cpp
 +++ b/src/Script/Playerbots.cpp
-@@ -33,6 +33,7 @@
+@@ -33,6 +33,9 @@
  #include "PlayerbotCommandScript.h"
  #include "cmath"
  #include "BattleGroundTactics.h"
-+#include "GuildRecruitmentEvent.h"
++#include "OngoingGuildRecruit.h"
++#include "PartyGuildFormation.h"
++#include "PersonalityGuildFactory.h"
  
  class PlayerbotsDatabaseScript : public DatabaseScript
  {
-@@ -380,6 +381,7 @@ public:
+@@ -380,6 +383,9 @@ public:
      {
          PlayerbotWorldThreadProcessor::instance().Update(diff);
          sRandomPlayerbotMgr.UpdateAI(diff);  // World thread only
-+        GuildRecruitmentEvent::instance().Update(diff);  // World thread only
++        OngoingGuildRecruit::instance().Update(diff);            // World thread only
++        PersonalityGuildFactory::UpdateEmergentFounding(diff);   // World thread only
++        PartyGuildFormation::instance().Update(diff);            // World thread only
      }
  };
  
+@@ -539,6 +545,7 @@ void AddPlayerbotsScripts()
+     new PlayerbotsWorldScript();
+     new PlayerbotsScript();
+     new PlayerBotsBGScript();
++    AddSC_PartyGuildFormation();
+     AddPlayerbotsSecureLoginScripts();
+     AddPlayerbotsCommandscripts();
+     PlayerBotsGuildValidationScript();

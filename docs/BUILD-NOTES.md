@@ -452,3 +452,32 @@ leaders are drawn from all races and deploy to the actual newbie zones. Also
 noted: the realm-start recruitment is a one-shot 15-min window (uptime<30min
 guard), and leaders drift after teleport because their normal RPG AI keeps
 running — findability/recurrence are follow-ups.
+
+## 22. Guild lifecycle redesign: emergent, ongoing, party→guild (2026-07-03)
+
+Reworked guilds from a one-time batch at realm start into a living lifecycle,
+after play-testing showed the batch approach saturated every guild to the cap
+instantly (so nothing could grow and the player couldn't be recruited) and the
+realm-start teleport-to-spawn recruiter was hard to find (leaders drifted;
+on a fresh world only Death Knights met the leader-level floor, so they all
+recruited at the DK zone).
+
+Three cooperating systems (`mod-playerbots`, all ticked from
+`PlayerbotsWorldScript::OnUpdate`; details in
+[internals/12-guilds.md](internals/12-guilds.md) and
+[BOT-BEHAVIOR Section 12](BOT-BEHAVIOR.md)):
+- **Emergent formation** — seed 2, then found one guild per 300 s up to 12,
+  each started *small* so it has headroom to grow.
+- **Ongoing recruiting** — founder bots recruit nearby unguilded bots
+  (fit-respecting) and the player (sentiment-gated) during normal play.
+- **Party→guild** — a good 5-min+ party crystallizes into a guild; deaths
+  lower the odds; founder is the party's best leader personality or the player
+  if they initiate ("let's guild up" in party chat).
+
+The realm-start `GuildRecruitmentEvent` was decoupled (files left on disk,
+uncalled). Params were deliberately **tightened** for real play: recruit
+interval 45→180 s, per-pair cooldown 15→120 min, chances halved, plus a new
+global 30-min cap on player invite popups across all leaders; emergent 150→300 s
+and target 18→12; party base chance 15→8 %. Validate anytime with
+`./validate-guilds.sh` (leader existence, archetype fit, elite purity,
+membership cap, naming).

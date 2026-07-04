@@ -38,9 +38,9 @@ while IFS='|' read -r arch leaderpers; do
 done < <(grep -oE "Formed (raid|pvp|casual) guild '[^']*' led by [^ ]+ \([A-Z_]+\)" "$PLOG" | sed -E "s/Formed ([a-z]+) guild.*\(([A-Z_]+)\)/\1|\2/")
 [ "$MISMATCH" = 0 ] && pass "all leaders fit their archetype (from log)" || fail "$MISMATCH leader/archetype mismatches"
 
-# 4. Recruitment deployed one leader per guild
-RECRUIT=$(grep -c "left to recruit" "$PLOG")
-[ "$RECRUIT" = "$GUILDS" ] && pass "recruitment deployed ($RECRUIT/$GUILDS leaders)" || warn "recruit deploys=$RECRUIT vs guilds=$GUILDS (differ if a reset happened between)"
+# 4. Emergent formation is producing guilds
+EMERGED=$(grep -c "\[EmergentGuild\] founded" "$PLOG")
+[ "$EMERGED" -gt 0 ] && pass "emergent formation active ($EMERGED founded this boot)" || warn "no [EmergentGuild] foundings yet (seed still warming, or all pre-existing)"
 
 # 5. LLM naming coverage
 RENAMED=$(grep -c "renamed guild" "$SLOG")
