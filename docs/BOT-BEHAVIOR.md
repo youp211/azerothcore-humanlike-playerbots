@@ -126,10 +126,12 @@ pairs work too.
 - **World events** (our patch, no LLM): duel ends −0.03 between the two;
   group add +0.02 vs each member; guild join +0.01 vs online guildmates.
   Conf: `OllamaChat.SentimentEvent{Duel,Group,Guild}Adjustment`.
+- **PvP conduct** (our patch, no LLM): fighting beside bots, saving one, or
+  ganking a lowbie in view of them moves respect up or down. Full rules in Section 13.
 
-**Used by**: chat prompts (`{sentiment_info}` steers tone), and quest-help
-invites (Section 6). Inspect: `.ollama sentiment view <bot> <player>` in-game, or
-query the table.
+**Used by**: chat prompts (`{sentiment_info}` steers tone), quest-help invites
+(Section 6), guild invites (Section 12), and PvP respect (Section 13). Inspect:
+`.ollama sentiment view <bot> <player>` in-game, or query the table.
 
 ## 5. Gear-inspect chat context
 
@@ -402,3 +404,56 @@ and its 15-min window was easy to miss; ongoing recruiting supersedes it. The
 `GuildRecruitmentEvent` file remains on disk, uncalled.)*
 
 Validate the whole system anytime with `./validate-guilds.sh`.
+
+## 13. PvP respect: appreciation, rescues & gank disapproval (2026-07-03)
+
+**What**: how someone *fights* moves the sentiment (Section 4) of the friendly bots
+around them. Fight well beside bots and they warm to you; **save** one and they
+really warm to you; **gank** a lowbie in front of them and they cool on you.
+Because sentiment already gates guild invites (Section 12), quest help (Section 6) and gear
+gives, honorable PvP organically earns friendship and, over time, a guild spot.
+Source: `mod-ollama-chat_pvp.cpp`, hooking `PlayerScript::OnPlayerPVPKill`.
+
+**The core split** (this is the important design bit): **respect and memory
+ALWAYS update; the spoken reaction is optional.** A kill is classified, every
+affected bot's sentiment moves and a memory is recorded silently — then, *only*
+if a real player is close enough to hear it, at most one bot may **chime in**.
+Whether it does is a chance scaled by that bot's personality talkativeness
+(`GetPersonalityReplyChanceMultiplier`): the e-girl gushes "ty for the save
+:3", the arena elitist grunts "good work", the quiet noob says nothing but still
+remembers. The line itself is model-generated from the fight context, never
+canned (per the design principle — see memory `design-principles`).
+
+**Three cases**, decided per kill (priority order):
+- **Rescue** — the killed enemy's current target (`GetVictim()`) was a friendly
+  random bot at/under `PvpRescueHealthPct` (35%) HP: that bot was about to die
+  and you saved it. Big bump `PvpRescueSentiment` (+0.12), a remembered rescue,
+  and a grateful line (whispered if a real player saved it; said aloud if a bot
+  did). A rescued **guild-leader** bot in high regard (≥0.6) may also voice a
+  guild pitch (`PvpBuddyGuildChance`); the actual invite still flows through the
+  ongoing recruiter (Section 12), so there's never a double popup.
+- **Appreciation** — an honorable kill: every fighting friendly bot in range
+  gains `PvpKillSentiment` (+0.03). A rescue *also* gives the rest of the group
+  this smaller bump — a save is a fun fight for everyone, not just the saved bot
+  (the saved bot keeps its bigger bump via a per-pair cooldown).
+- **Gank** — the foe was `PvpGankLevelGap` (10) + levels below the killer with
+  no real fight around: witnesses that can *see* it (`IsWithinLOSInMap`) lose
+  `PvpGankSentiment` (−0.05). **Not** a gank — and so no penalty — if a friendly
+  bot was already fighting the target (a shared fight, "all other bots can be
+  killed"), the killer is fighting an enemy their own size, or a high-level
+  enemy is nearby (all signal a real skirmish, not a stomp).
+
+**Killer can be a bot.** Everything above applies whether the killer is a real
+player or another random bot — bots judge each other's conduct too, building the
+unseen history that shapes who wants to guild with whom. The only thing gated to
+a real player being present is the *voice* (so 600 bots skirmishing never wakes
+Ollama); sentiment and memory update regardless. Bot↔bot memory rows are a
+deliberate no-op (memory is bounded to real, guilded players — Section 13-memory), so
+this adds no DB churn.
+
+**Cheap by construction**: one bounded map walk per kill (range-gated, ≤10
+witnesses) that simultaneously collects witnesses, notes a nearby real player,
+and notes a nearby high-level enemy; a 2-minute per-pair cooldown so a kill farm
+can't spam standing. Conf: `OllamaChat.Pvp*` (see `mod_ollama_chat.conf.dist`).
+Log: `grep "\[PvpFriend\]" server/bin/Playerbots.log`. Full function-level
+walk-through: [internals/17-pvp-respect.md](internals/17-pvp-respect.md).

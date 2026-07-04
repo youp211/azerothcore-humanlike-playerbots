@@ -135,3 +135,21 @@ JOIN acore_characters.item_instance ii ON ii.guid = ah.itemguid LIMIT 20;
       "let's guild up" in party chat to trigger it if the party qualifies.
       `grep "\[PartyGuild\]"`. A wipe (several deaths) makes it decline.
 - [ ] `./validate-guilds.sh` → all PASS/WARN, no FAIL
+
+## 14. PvP respect (appreciation / rescue / gank)
+- [ ] **No "AI was reset" leak**: invite bots to a group, then leave/disband →
+      *no* "AI was reset to defaults" bubbles in /say (the original bug)
+- [ ] **Rescue**: let a friendly bot drop low fighting an enemy-faction bot,
+      land the killing blow on its attacker → a grateful line (chatty
+      personalities) and respect jump. `grep "\[PvpFriend\]" .../Playerbots.log`
+      → "rescued". Verify with `.ollama sentiment view <bot> <you>`
+- [ ] **Appreciation**: honorable kills beside fighting bots → small respect
+      rise for the group; a talkative witness may say "good work"
+- [ ] **Gank**: kill an enemy-faction bot 10+ levels below you, in view of a
+      friendly bot, with no bigger fight around → a disapproving line + respect
+      drop. Then confirm the exclusions: it should NOT count as a gank if a bot
+      was already fighting that target, or a high-level enemy is nearby
+- [ ] **Personality gate**: the quiet types stay silent (respect still moves);
+      only chatty personalities pipe up, and only with a real player in earshot
+- [ ] **Config**: `OllamaChat.Pvp*` knobs in `mod_ollama_chat.conf` tune ranges,
+      respect deltas, and voice chances

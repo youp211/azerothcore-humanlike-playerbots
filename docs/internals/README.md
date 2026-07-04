@@ -58,6 +58,7 @@ the three things that trip up every change:
 | 14 | [social-channels](14-social-channels.md) | Group-join/who-me, channel system, SpeakSituation |
 | 15 | [finetune-pipeline](15-finetune-pipeline.md) | Dataset generator, training, staged deploy gate |
 | 16 | [ops](16-ops.md) | reset-world, systemd, self-healing client launcher |
+| 17 | [pvp-respect](17-pvp-respect.md) | PvP kills/rescues/ganks move respect; personality-gated chatter |
 
 ## The recurring patterns (learn these once)
 

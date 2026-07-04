@@ -18,6 +18,10 @@ battlegrounds and dungeons, upgrade their gear — and behave like *people*:
 - **Arena coordination**: bot arena teams focus one kill target (yours, if you
   attack first) and hold burst cooldowns until a teammate — including you —
   pops theirs. (Activates once bots level to 70+.)
+- **World PvP respect**: fighting well beside bots earns their respect, *saving*
+  one earns a lot (and a grateful "ty for the save"), and ganking a lowbie in
+  front of them costs it. Bots judge each other's conduct too. Rising respect
+  feeds the same guild/help/gift gates — so honorable PvP wins you friends.
 
 **New here? Start with [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) — overview + install guide.**
 **Deep dive on every behavior system: [docs/BOT-BEHAVIOR.md](docs/BOT-BEHAVIOR.md).**

@@ -481,3 +481,58 @@ global 30-min cap on player invite popups across all leaders; emergent 150→300
 and target 18→12; party base chance 15→8 %. Validate anytime with
 `./validate-guilds.sh` (leader existence, archetype fit, elite purity,
 membership cap, naming).
+
+## 23. AI-reset chat leak fix + PvP respect system (2026-07-03)
+
+**Two changes, one build.**
+
+**The "AI was reset to defaults" leak.** Screenshots from the undead starting
+zone caught three bots blurting *"AI was reset to defaults"* into public /say
+around the Deathknell campfire the moment the player left the group. Cause: the
+stock `ResetAiAction` (`mod-playerbots`) `TellMaster`s that status line whenever
+a bot's AI resets on a routine group join/leave — fine for a real player's
+controlled bot, spam for the 600 autonomous ones. Fix (`ResetAiAction.cpp`):
+gate the `TellMaster` behind `!sRandomPlayerbotMgr.IsRandomBot(bot)`, so only a
+real player actively controlling a bot ever sees it. Grepped the module — that
+is the sole emitter of the string.
+
+**PvP respect.** New feature the player asked for ("I like pvp… I want the bots
+to appreciate if they're saved or if they have had fun… and if you gank low
+levels and a nearby bot could witness it they don't like that"). New self-
+contained `mod-ollama-chat_pvp.cpp/.h` hooking `PlayerScript::OnPlayerPVPKill`;
+full mechanics in [BOT-BEHAVIOR Section 13](BOT-BEHAVIOR.md) and
+[internals/17-pvp-respect.md](internals/17-pvp-respect.md). It reuses sentiment
++ memory + `OllamaChat_SpeakSituation`, adds no tables. Every enemy-faction kill
+near fighting friendly bots classifies as **rescue** (save a low-HP bot: +0.12 +
+grateful line), **appreciation** (honorable kill: +0.03 to the whole fighting
+group), or **gank** (foe 10+ levels down with no bigger fight around: witnesses
+in line-of-sight lose 0.05).
+
+The design converged over several refinements from the player, all folded into
+the one file before building:
+- **Rescue also warms the group**, not just the saved bot ("appreciate everyone
+  around and a part of the fight") — rescue and appreciation co-occur; only a
+  gank suppresses appreciation.
+- **Gank has real exclusions** ("if another bot initiates combat then it's fine
+  and all other bots can be killed… if a player starts by fighting a high level
+  or high levels are nearby then they also don't consider it a gank"): a shared
+  fight (a bot already on the target), a same-size fight, or a high-level enemy
+  nearby all cancel the penalty.
+- **Applies to bot killers too** ("any feature I say for player pretty much
+  would apply to other bots too") — bots judge each other, feeding guild
+  formation. The sentiment store was already generic `guid→guid→float`;
+  `RecordMemoryForPair` already no-ops for two-bot pairs, so this adds no DB
+  churn.
+- **Respect always moves; chatter is a personality-scaled chance** ("respect
+  etc will always go up, it's the chats that are a chance… the egirl is like
+  thanks for saving me :3 and the elite pvper is like good work and the quiet
+  noob wouldn't say anything… generate the messages based on the fight
+  context"): the spoken line rolls `baseChance × GetPersonalityReplyChanceMultiplier`
+  and only fires when a real player is in earshot — so 600 bots skirmishing
+  never wakes Ollama. Lines are model-generated from fight context, never canned.
+
+Build was incremental and clean (`build.sh` → cmake reconfigure picked up the
+new `.cpp`, worldserver relinked, no errors); `systemctl restart wow-world`
+loaded it, world initialized in 11 s, 600 bots relogged, `Errors.log` clean.
+Tunables: `OllamaChat.Pvp*` in `mod_ollama_chat.conf.dist`. Log:
+`grep "\[PvpFriend\]" server/bin/Playerbots.log`.

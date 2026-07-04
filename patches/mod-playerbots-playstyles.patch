@@ -401,6 +401,22 @@ index 02162ef3..a9998114 100644
  class InviteNearbyToGroupAction : public InviteToGroupAction
  {
  public:
+diff --git a/src/Ai/Base/Actions/ResetAiAction.cpp b/src/Ai/Base/Actions/ResetAiAction.cpp
+index 290d0ae1..740b14b0 100644
+--- a/src/Ai/Base/Actions/ResetAiAction.cpp
++++ b/src/Ai/Base/Actions/ResetAiAction.cpp
+@@ -61,6 +61,10 @@ bool ResetAiAction::Execute(Event event)
+     }
+     PlayerbotRepository::instance().Reset(botAI);
+     botAI->ResetStrategies(false);
+-    botAI->TellMaster("AI was reset to defaults");
++    // Only surface this to a real player who is actively controlling a bot.
++    // Autonomous random bots reset their AI on routine group joins/leaves and
++    // must not broadcast "AI was reset to defaults" into public /say.
++    if (!sRandomPlayerbotMgr.IsRandomBot(bot))
++        botAI->TellMaster("AI was reset to defaults");
+     return true;
+ }
 diff --git a/src/Ai/Base/Actions/TradeStatusAction.cpp b/src/Ai/Base/Actions/TradeStatusAction.cpp
 index c3a63ee7..cfbe480e 100644
 --- a/src/Ai/Base/Actions/TradeStatusAction.cpp
