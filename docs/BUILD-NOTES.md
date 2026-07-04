@@ -435,3 +435,20 @@ freeze).
 - **GM account renamed `admin` → `admin`** (SRP6 verifier binds the username,
   so the rename required recomputing salt+verifier — password reset to the
   default in the process; characters ride along on the account row).
+
+## 21. Guild validation + the fresh-world leader-level gotcha (2026-07-03)
+
+Validated the personality-guild system with a 12-agent workflow (each invariant
+checked vs live DB + the source defining it, then adversarially re-verified) and
+a re-runnable `validate-guilds.sh`. Result: formation, leader↔archetype fit,
+elite-purity/casual-mixing, membership integrity, and recruitment deployment all
+PASS; LLM naming WARN (async rename dropped for a few guilds under login load).
+
+**Gotcha found in play:** on a *fresh* world every bot is level 1 except Death
+Knights (start 55), so with `PersonalityGuild.LeaderMinLevel = 10` the ONLY
+eligible guild leaders were DKs — and they all recruited at the DK start zone
+(map 609), invisible to a new non-DK player. Fix: `LeaderMinLevel = 1` so
+leaders are drawn from all races and deploy to the actual newbie zones. Also
+noted: the realm-start recruitment is a one-shot 15-min window (uptime<30min
+guard), and leaders drift after teleport because their normal RPG AI keeps
+running — findability/recurrence are follow-ups.

@@ -1,5 +1,5 @@
 diff --git a/conf/playerbots.conf.dist b/conf/playerbots.conf.dist
-index a03b13e3..ec53b6ec 100644
+index a03b13e3..9d915d34 100644
 --- a/conf/playerbots.conf.dist
 +++ b/conf/playerbots.conf.dist
 @@ -174,6 +174,30 @@ AiPlayerbot.RandomBotGuildSizeMax = 15
@@ -25,7 +25,7 @@ index a03b13e3..ec53b6ec 100644
 +AiPlayerbot.PersonalityGuild.CasualCount = 8
 +
 +# Minimum level a bot must be to lead a personality guild
-+AiPlayerbot.PersonalityGuild.LeaderMinLevel = 10
++AiPlayerbot.PersonalityGuild.LeaderMinLevel = 1
 +
 +# Per-bot chance (0-100) that an eligible bot rolls into a casual guild
 +AiPlayerbot.PersonalityGuild.CasualJoinChance = 40.0
