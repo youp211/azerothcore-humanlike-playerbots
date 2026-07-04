@@ -19,6 +19,7 @@ battlegrounds and dungeons, upgrade their gear — and behave like *people*:
   attack first) and hold burst cooldowns until a teammate — including you —
   pops theirs. (Activates once bots level to 70+.)
 
+**New here? Start with [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) — overview + install guide.**
 **Deep dive on every behavior system: [docs/BOT-BEHAVIOR.md](docs/BOT-BEHAVIOR.md).**
 **Function-level code reference for every subsystem: [docs/internals/](docs/internals/README.md).**
 **Full build/migration history with every problem and fix: [docs/BUILD-NOTES.md](docs/BUILD-NOTES.md).**
