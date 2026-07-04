@@ -20,6 +20,7 @@ battlegrounds and dungeons, upgrade their gear — and behave like *people*:
   pops theirs. (Activates once bots level to 70+.)
 
 **Deep dive on every behavior system: [docs/BOT-BEHAVIOR.md](docs/BOT-BEHAVIOR.md).**
+**Function-level code reference for every subsystem: [docs/internals/](docs/internals/README.md).**
 **Full build/migration history with every problem and fix: [docs/BUILD-NOTES.md](docs/BUILD-NOTES.md).**
 
 Current host (since 2026-07-02): i7-14700K, 32 GB RAM, **RX 7900 XT** — the
