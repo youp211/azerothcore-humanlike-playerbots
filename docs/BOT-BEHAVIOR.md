@@ -457,3 +457,46 @@ and notes a nearby high-level enemy; a 2-minute per-pair cooldown so a kill farm
 can't spam standing. Conf: `OllamaChat.Pvp*` (see `mod_ollama_chat.conf.dist`).
 Log: `grep "\[PvpFriend\]" server/bin/Playerbots.log`. Full function-level
 walk-through: [internals/17-pvp-respect.md](internals/17-pvp-respect.md).
+
+## 14. Dungeon companions: autofill & experience-based persistence (2026-07-10)
+
+**What**: two behaviors that make dungeons feel populated *and* consequential.
+Source: `mod-playerbots/src/Bot/Factory/DungeonCompanions.cpp`.
+
+**Autofill** — queue the dungeon finder and you never wait on the matchmaker. A
+world-thread tick watches every real player who is queued (`LFG_STATE_QUEUED`)
+with an unfull group and pushes free, level-appropriate random bots into the same
+queue — preferring a proper **tank / healer / DPS** comp — using the exact packet
+a bot uses to queue itself; the core LFG matcher then forms the group. It re-tops
+the queue each pass until the group forms (a per-player cooldown keeps it gentle),
+and it works with the chat module off. Conf: `AiPlayerbot.DungeonAutofill.*`.
+
+**Persistence** — the bots you feel *strongly* about after a run stick around;
+the forgettable ones don't. Every dungeon **run** (a group with you + ≥1 random
+bot that actually zones into an instance) is tracked. When it ends, each bot is
+judged by its sentiment toward you (Section 4) after a **run-outcome nudge**: a clean,
+long-enough completed run raises sentiment (`CompletionNudge` +0.15), each death
+lowers it (`DeathNudge` −0.04 apiece). Then:
+
+- **Good** run — sentiment ≥ `GoodThreshold` (0.65) → saved as a **friend** (and
+  the bot whispers a "let's keep adventuring" line).
+- **Very bad** run — sentiment ≤ `TrollThreshold` (0.20) → saved as a **troll**
+  (memorable for the wrong reasons; it just persists, no friendly line).
+- **Neutral** in between → **not saved**; the bot returns to the random pool as a
+  throwaway, instance-only filler and gets re-randomised as usual.
+
+Because it reuses sentiment, everything that already moves sentiment feeds this:
+grouping up (+), completing quests together, chatting warmly (+) or being rude
+(−), and PvP conduct (Section 13). A bot that trolled you in chat during the run walks
+in with low sentiment and the wipe nudges finish the job → it saves as a troll.
+
+**The persistence effect**: a saved companion is excluded from the random-bot
+**re-randomise** churn (one `IsCompanion` guard before `Randomize` in
+`RandomPlayerbotMgr::ProcessBot`), so it keeps its name, level and gear and can be
+run into again out in the world — instead of being silently re-rolled into a
+different character like every other pool bot. Saved rows live in
+`acore_characters.mod_playerbots_companions`; delete a row by hand to forget a
+companion. Conf: `AiPlayerbot.DungeonCompanion.*`. Log:
+`grep "\[DungeonCompanions\]\|\[DungeonAutofill\]" server/bin/Playerbots.log`.
+Full function-level walk-through:
+[internals/18-dungeon-companions.md](internals/18-dungeon-companions.md).

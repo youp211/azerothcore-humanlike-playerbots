@@ -22,6 +22,13 @@ battlegrounds and dungeons, upgrade their gear — and behave like *people*:
   one earns a lot (and a grateful "ty for the save"), and ganking a lowbie in
   front of them costs it. Bots judge each other's conduct too. Rising respect
   feeds the same guild/help/gift gates — so honorable PvP wins you friends.
+- **Dungeons that always fill — and remember you**: queue the dungeon finder and
+  free bots are pushed in to fill it (a tank, a healer, DPS) instead of waiting
+  on the matchmaker. When the run ends, the bots you left a *strong* impression
+  on stick around in the world as themselves: a great run makes a bot a **friend**,
+  a genuinely awful one makes it a **troll** — both keep their identity and can be
+  run into again. Forgettable, neutral runs leave the bots as throwaway instance
+  fillers. Driven entirely off the sentiment system above.
 
 **New here? Start with [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) — overview + install guide.**
 **Deep dive on every behavior system: [docs/BOT-BEHAVIOR.md](docs/BOT-BEHAVIOR.md).**
@@ -160,6 +167,12 @@ keys: [docs/BOT-BEHAVIOR.md](docs/BOT-BEHAVIOR.md).
 - **Quest-help invites** (ours): `AiPlayerbot.QuestHelp{SentimentThreshold,ConfirmedChance,NearbyChance,RandomChance}`.
 - **Rated arena** (upstream, enabled): `RandomBotAutoJoinBGRatedArena2v2Count = 2`,
   `3v3Count = 1`; teams auto-create when 70+ captains exist.
+- **Dungeon autofill** (ours): `AiPlayerbot.DungeonAutofill.*` — fills a queued
+  player's dungeon with role-appropriate free bots.
+- **Dungeon companions** (ours): `AiPlayerbot.DungeonCompanion.*` — good/troll
+  runs persist the bot (thresholds `GoodThreshold = 0.65` / `TrollThreshold = 0.20`);
+  saved companions live in `acore_characters.mod_playerbots_companions` and are
+  kept out of the random-bot re-randomise churn.
 
 **`server/etc/modules/mod_ollama_chat.conf`**:
 

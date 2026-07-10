@@ -1,5 +1,5 @@
 diff --git a/conf/playerbots.conf.dist b/conf/playerbots.conf.dist
-index a03b13e3..b4cb310e 100644
+index 9befb8a..ceb5850 100644
 --- a/conf/playerbots.conf.dist
 +++ b/conf/playerbots.conf.dist
 @@ -174,6 +174,102 @@ AiPlayerbot.RandomBotGuildSizeMax = 15
@@ -105,7 +105,7 @@ index a03b13e3..b4cb310e 100644
  # Randombots will invite players to groups/raids/guilds
  AiPlayerbot.RandomBotInvitePlayer = 0
  
-@@ -2351,3 +2447,19 @@ AiPlayerbot.TargetPosRecalcDistance = 0.1
+@@ -2364,3 +2460,79 @@ AiPlayerbot.TargetPosRecalcDistance = 0.1
  
  # Allow bots to be summoned near innkeepers
  AiPlayerbot.SummonAtInnkeepersEnabled = 1
@@ -125,11 +125,92 @@ index a03b13e3..b4cb310e 100644
 +# (elitists overprice, clueless underprice). % per check while near an auctioneer; per-bot cap.
 +AiPlayerbot.BotAhSellChance = 25.0
 +AiPlayerbot.BotAhSellMaxListings = 8
++
++###################################################################################################
++# DUNGEON AUTOFILL (local patch)
++#
++# Keeps every real player's dungeon-finder queue fed with role/level-appropriate random bots, so a
++# queued dungeon ALWAYS fills instead of waiting on the vanilla matchmaker to happen to have the
++# right bots queued. A world-thread tick queues free bots (a tank, a healer, then DPS) for the
++# player's selected dungeons using the same mechanism bots use to queue themselves; the core LFG
++# matcher then forms the group. Self-healing - if a tick doesn't form the group it tops the queue
++# up again next tick.
++###################################################################################################
++
++# Master switch for dungeon autofill
++AiPlayerbot.DungeonAutofill.Enabled = 1
++
++# Seconds between autofill passes over queued real players
++AiPlayerbot.DungeonAutofill.IntervalSec = 10
++
++# Minimum seconds before the same player's queue is topped up again (gentle fill, not every tick)
++AiPlayerbot.DungeonAutofill.PlayerCooldownSec = 20
++
++# Max level difference between a filler bot and the player (keeps the core LFG join valid)
++AiPlayerbot.DungeonAutofill.LevelSpread = 4
++
++###################################################################################################
++# DUNGEON COMPANIONS - EXPERIENCE-BASED PERSISTENCE (local patch)
++#
++# Every dungeon RUN (a group with the real player + >= 1 random bot that actually zones into an
++# instance) is tracked. When it ends, each participating bot is judged by its live mod-ollama-chat
++# sentiment toward the player, after a run-outcome nudge (a clean, long-enough run raises it; each
++# member death lowers it):
++#   - GOOD experience (sentiment >= GoodThreshold)  -> saved as a "friend"
++#   - very BAD        (sentiment <= TrollThreshold)  -> saved as a "troll"
++#   - NEUTRAL in between                             -> NOT saved; the bot returns to the random
++#     pool (instance-only, re-randomised as usual).
++# Saved companions (loved OR hated) are excluded from the random-bot re-randomise churn, so they
++# keep their identity and can be run into again in the world. Requires mod-ollama-chat sentiment
++# tracking; with it disabled, no companions are saved. Thresholds are on the 0.0-1.0 scale.
++###################################################################################################
++
++# Master switch for companion persistence
++AiPlayerbot.DungeonCompanion.Enabled = 1
++
++# Sentiment at/above which a bot is saved as a friend
++AiPlayerbot.DungeonCompanion.GoodThreshold = 0.65
++
++# Sentiment at/below which a bot is saved as a troll
++AiPlayerbot.DungeonCompanion.TrollThreshold = 0.20
++
++# Minutes a run must have lasted for the completion nudge to apply (filters quick abandons)
++AiPlayerbot.DungeonCompanion.MinMinutes = 8
++
++# Sentiment bump applied to each bot for a clean, long-enough completed run
++AiPlayerbot.DungeonCompanion.CompletionNudge = 0.15
++
++# Sentiment drop applied to each bot per member death during the run
++AiPlayerbot.DungeonCompanion.DeathNudge = 0.04
++
++# Seconds between "resolve finished/stale runs" sweeps
++AiPlayerbot.DungeonCompanion.ResolveIntervalSec = 30
+diff --git a/data/sql/characters/base/2026_07_10_dungeon_companions.sql b/data/sql/characters/base/2026_07_10_dungeon_companions.sql
+new file mode 100644
+index 0000000..75cec93
+--- /dev/null
++++ b/data/sql/characters/base/2026_07_10_dungeon_companions.sql
+@@ -0,0 +1,15 @@
++-- Persistent dungeon companions: random bots that a real player ran a dungeon
++-- with and came away feeling STRONGLY about -- either a great run (friend) or a
++-- genuinely bad one (troll). Both are memorable, so both stick around: while a
++-- guid is in this table, RandomPlayerbotMgr skips re-randomising it, so the bot
++-- keeps its name/level/gear identity and can be run into again out in the world.
++-- Bots the player felt neutral about are never inserted -- they stay throwaway
++-- random-pool bots (instance-only). One row per bot; the newest run wins.
++CREATE TABLE IF NOT EXISTS mod_playerbots_companions (
++    bot_guid    INT UNSIGNED NOT NULL PRIMARY KEY COMMENT 'Character guid (low) of the persisted bot',
++    player_guid INT UNSIGNED NOT NULL COMMENT 'Character guid (low) of the real player who made it memorable',
++    disposition TINYINT UNSIGNED NOT NULL DEFAULT 1 COMMENT '1 = friend (good run), 2 = troll (bad run)',
++    sentiment   FLOAT NOT NULL DEFAULT 0.5 COMMENT 'Bot->player sentiment at save time (0=hostile,1=friendly)',
++    created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    KEY idx_player (player_guid)
++) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 diff --git a/src/Ai/Base/ActionContext.h b/src/Ai/Base/ActionContext.h
-index 7b95e4b0..b7ce1036 100644
+index 229f1b2..6b13994 100644
 --- a/src/Ai/Base/ActionContext.h
 +++ b/src/Ai/Base/ActionContext.h
-@@ -123,6 +123,7 @@ public:
+@@ -124,6 +124,7 @@ public:
          creators["dps assist"] = &ActionContext::dps_assist;
          creators["dps aoe"] = &ActionContext::dps_aoe;
          creators["attack rti target"] = &ActionContext::attack_rti_target;
@@ -137,7 +218,7 @@ index 7b95e4b0..b7ce1036 100644
          creators["loot"] = &ActionContext::loot;
          creators["add loot"] = &ActionContext::add_loot;
          creators["add gathering loot"] = &ActionContext::add_gathering_loot;
-@@ -275,6 +276,8 @@ public:
+@@ -276,6 +277,8 @@ public:
          creators["new rpg wander random"] = &ActionContext::new_rpg_wander_random;
          creators["new rpg wander npc"] = &ActionContext::new_rpg_wander_npc;
          creators["new rpg do quest"] = &ActionContext::new_rpg_do_quest;
@@ -146,7 +227,7 @@ index 7b95e4b0..b7ce1036 100644
          creators["new rpg travel flight"] = &ActionContext::new_rpg_travel_flight;
          creators["new rpg outdoor pvp"] = &ActionContext::new_rpg_outdoor_pvp;
          creators["wait for attack keep safe distance"] = &ActionContext::wait_for_attack_keep_safe_distance;
-@@ -357,6 +360,7 @@ private:
+@@ -358,6 +361,7 @@ private:
      static Action* dps_assist(PlayerbotAI* botAI) { return new DpsAssistAction(botAI); }
      static Action* dps_aoe(PlayerbotAI* botAI) { return new DpsAoeAction(botAI); }
      static Action* attack_rti_target(PlayerbotAI* botAI) { return new AttackRtiTargetAction(botAI); }
@@ -154,7 +235,7 @@ index 7b95e4b0..b7ce1036 100644
      static Action* tank_assist(PlayerbotAI* botAI) { return new TankAssistAction(botAI); }
      static Action* drink(PlayerbotAI* botAI) { return new DrinkAction(botAI); }
      static Action* food(PlayerbotAI* botAI) { return new EatAction(botAI); }
-@@ -482,6 +486,8 @@ private:
+@@ -483,6 +487,8 @@ private:
      static Action* new_rpg_wander_random(PlayerbotAI* ai) { return new NewRpgWanderRandomAction(ai); }
      static Action* new_rpg_wander_npc(PlayerbotAI* ai) { return new NewRpgWanderNpcAction(ai); }
      static Action* new_rpg_do_quest(PlayerbotAI* ai) { return new NewRpgDoQuestAction(ai); }
@@ -164,10 +245,10 @@ index 7b95e4b0..b7ce1036 100644
      static Action* new_rpg_outdoor_pvp(PlayerbotAI* ai) { return new NewRpgOutdoorPvpAction(ai); }
      static Action* wait_for_attack_keep_safe_distance(PlayerbotAI* ai) { return new WaitForAttackKeepSafeDistanceAction(ai); }
 diff --git a/src/Ai/Base/Actions/BattleGroundTactics.cpp b/src/Ai/Base/Actions/BattleGroundTactics.cpp
-index 238a2291..aa4f9fc7 100644
+index dd34abb..2a2f42b 100644
 --- a/src/Ai/Base/Actions/BattleGroundTactics.cpp
 +++ b/src/Ai/Base/Actions/BattleGroundTactics.cpp
-@@ -4430,3 +4430,13 @@ bool ArenaTactics::moveToCenter(Battleground* bg)
+@@ -4431,3 +4431,13 @@ bool ArenaTactics::moveToCenter(Battleground* bg)
  
      return true;
  }
@@ -182,10 +263,10 @@ index 238a2291..aa4f9fc7 100644
 +    return true;
 +}
 diff --git a/src/Ai/Base/Actions/BattleGroundTactics.h b/src/Ai/Base/Actions/BattleGroundTactics.h
-index 4c0072df..e3a1a596 100644
+index 1e7638b..437d80d 100644
 --- a/src/Ai/Base/Actions/BattleGroundTactics.h
 +++ b/src/Ai/Base/Actions/BattleGroundTactics.h
-@@ -144,4 +144,15 @@ private:
+@@ -145,4 +145,15 @@ private:
      bool moveToCenter(Battleground* bg);
  };
  
@@ -202,10 +283,10 @@ index 4c0072df..e3a1a596 100644
 +
  #endif
 diff --git a/src/Ai/Base/Actions/ChooseTargetActions.cpp b/src/Ai/Base/Actions/ChooseTargetActions.cpp
-index debcfac0..18d0386f 100644
+index bc035bb..1295a9a 100644
 --- a/src/Ai/Base/Actions/ChooseTargetActions.cpp
 +++ b/src/Ai/Base/Actions/ChooseTargetActions.cpp
-@@ -189,3 +189,15 @@ bool AttackRtiTargetAction::isUseful()
+@@ -190,3 +190,15 @@ bool AttackRtiTargetAction::isUseful()
  
      return true;
  }
@@ -222,10 +303,10 @@ index debcfac0..18d0386f 100644
 +    return killTarget && bot->GetVictim() != killTarget;
 +}
 diff --git a/src/Ai/Base/Actions/ChooseTargetActions.h b/src/Ai/Base/Actions/ChooseTargetActions.h
-index 21a24aa3..385fb660 100644
+index 80c9d6a..44d337a 100644
 --- a/src/Ai/Base/Actions/ChooseTargetActions.h
 +++ b/src/Ai/Base/Actions/ChooseTargetActions.h
-@@ -91,6 +91,15 @@ public:
+@@ -92,6 +92,15 @@ public:
      bool isUseful() override;
  };
  
@@ -242,10 +323,10 @@ index 21a24aa3..385fb660 100644
  {
  public:
 diff --git a/src/Ai/Base/Actions/InviteToGroupAction.cpp b/src/Ai/Base/Actions/InviteToGroupAction.cpp
-index e7bcb4da..8d0869b2 100644
+index 6fb6075..475c7cd 100644
 --- a/src/Ai/Base/Actions/InviteToGroupAction.cpp
 +++ b/src/Ai/Base/Actions/InviteToGroupAction.cpp
-@@ -6,12 +6,26 @@
+@@ -7,12 +7,26 @@
  #include "InviteToGroupAction.h"
  
  #include "BroadcastHelper.h"
@@ -272,7 +353,7 @@ index e7bcb4da..8d0869b2 100644
  
  bool InviteToGroupAction::Invite(Player* inviter, Player* player)
  {
-@@ -456,3 +470,103 @@ bool LfgAction::Execute(Event event)
+@@ -457,3 +471,103 @@ bool LfgAction::Execute(Event event)
  
      return false;
  }
@@ -377,10 +458,10 @@ index e7bcb4da..8d0869b2 100644
 +    return invited;
 +}
 diff --git a/src/Ai/Base/Actions/InviteToGroupAction.h b/src/Ai/Base/Actions/InviteToGroupAction.h
-index 02162ef3..a9998114 100644
+index a7a6f09..4d3130e 100644
 --- a/src/Ai/Base/Actions/InviteToGroupAction.h
 +++ b/src/Ai/Base/Actions/InviteToGroupAction.h
-@@ -32,6 +32,20 @@ public:
+@@ -33,6 +33,20 @@ public:
      bool Execute(Event event) override;
  };
  
@@ -402,10 +483,10 @@ index 02162ef3..a9998114 100644
  {
  public:
 diff --git a/src/Ai/Base/Actions/ResetAiAction.cpp b/src/Ai/Base/Actions/ResetAiAction.cpp
-index 290d0ae1..740b14b0 100644
+index 394e06a..f46695c 100644
 --- a/src/Ai/Base/Actions/ResetAiAction.cpp
 +++ b/src/Ai/Base/Actions/ResetAiAction.cpp
-@@ -61,6 +61,10 @@ bool ResetAiAction::Execute(Event event)
+@@ -62,6 +62,10 @@ bool ResetAiAction::Execute(Event event)
      }
      PlayerbotRepository::instance().Reset(botAI);
      botAI->ResetStrategies(false);
@@ -418,10 +499,10 @@ index 290d0ae1..740b14b0 100644
      return true;
  }
 diff --git a/src/Ai/Base/Actions/TradeStatusAction.cpp b/src/Ai/Base/Actions/TradeStatusAction.cpp
-index c3a63ee7..cfbe480e 100644
+index 6a5945f..f2ad6bf 100644
 --- a/src/Ai/Base/Actions/TradeStatusAction.cpp
 +++ b/src/Ai/Base/Actions/TradeStatusAction.cpp
-@@ -17,6 +17,49 @@
+@@ -18,6 +18,49 @@
  #include "RandomPlayerbotMgr.h"
  #include "SetCraftAction.h"
  
@@ -471,7 +552,7 @@ index c3a63ee7..cfbe480e 100644
  bool TradeStatusAction::Execute(Event event)
  {
      Player* trader = bot->GetTrader();
-@@ -26,6 +69,12 @@ bool TradeStatusAction::Execute(Event event)
+@@ -27,6 +70,12 @@ bool TradeStatusAction::Execute(Event event)
  
      PlayerbotAI* traderBotAI = GET_PLAYERBOT_AI(trader);
  
@@ -484,7 +565,7 @@ index c3a63ee7..cfbe480e 100644
      // Allow the master and group members to trade
      if (trader != master && !traderBotAI && (!bot->GetGroup() || !bot->GetGroup()->IsMember(trader->GetGUID())))
      {
-@@ -377,3 +426,75 @@ int32 TradeStatusAction::CalculateCost(Player* player, bool sell)
+@@ -378,3 +427,75 @@ int32 TradeStatusAction::CalculateCost(Player* player, bool sell)
  
      return sum;
  }
@@ -561,10 +642,10 @@ index c3a63ee7..cfbe480e 100644
 +    }
 +}
 diff --git a/src/Ai/Base/Actions/TradeStatusAction.h b/src/Ai/Base/Actions/TradeStatusAction.h
-index af481895..a6ec7f4a 100644
+index b0f220e..4676684 100644
 --- a/src/Ai/Base/Actions/TradeStatusAction.h
 +++ b/src/Ai/Base/Actions/TradeStatusAction.h
-@@ -22,6 +22,7 @@ private:
+@@ -23,6 +23,7 @@ private:
      void BeginTrade();
      bool CheckTrade();
      int32 CalculateCost(Player* player, bool sell);
@@ -573,10 +654,10 @@ index af481895..a6ec7f4a 100644
  
  #endif
 diff --git a/src/Ai/Base/Strategy/BattlegroundStrategy.cpp b/src/Ai/Base/Strategy/BattlegroundStrategy.cpp
-index f414e752..80de4fec 100644
+index 241aeef..5f45b9a 100644
 --- a/src/Ai/Base/Strategy/BattlegroundStrategy.cpp
 +++ b/src/Ai/Base/Strategy/BattlegroundStrategy.cpp
-@@ -84,4 +84,10 @@ void ArenaStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+@@ -85,4 +85,10 @@ void ArenaStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
  {
      triggers.push_back(
          new TriggerNode("no possible targets", { NextAction("arena tactics", ACTION_BG)}));
@@ -588,10 +669,10 @@ index f414e752..80de4fec 100644
 +        new TriggerNode("arena burst window", { NextAction("arena burst sync", ACTION_HIGH + 6.0f)}));
  }
 diff --git a/src/Ai/Base/Trigger/PvpTriggers.cpp b/src/Ai/Base/Trigger/PvpTriggers.cpp
-index b20c5df9..8f8d074d 100644
+index 77e9354..2d545b2 100644
 --- a/src/Ai/Base/Trigger/PvpTriggers.cpp
 +++ b/src/Ai/Base/Trigger/PvpTriggers.cpp
-@@ -9,6 +9,7 @@
+@@ -10,6 +10,7 @@
  #include "BattlegroundEY.h"
  #include "BattlegroundMgr.h"
  #include "BattlegroundWS.h"
@@ -599,7 +680,7 @@ index b20c5df9..8f8d074d 100644
  #include "Playerbots.h"
  #include "ServerFacade.h"
  #include "BattlegroundAV.h"
-@@ -335,3 +336,75 @@ bool AllianceNoSnowfallGY::IsActive()
+@@ -336,3 +337,75 @@ bool AllianceNoSnowfallGY::IsActive()
  
      return false;
  }
@@ -676,10 +757,10 @@ index b20c5df9..8f8d074d 100644
 +    return window != botAI->HasStrategy("boost", BOT_STATE_COMBAT);
 +}
 diff --git a/src/Ai/Base/Trigger/PvpTriggers.h b/src/Ai/Base/Trigger/PvpTriggers.h
-index 5077dda7..c1cb77f7 100644
+index ba60c5b..4070063 100644
 --- a/src/Ai/Base/Trigger/PvpTriggers.h
 +++ b/src/Ai/Base/Trigger/PvpTriggers.h
-@@ -26,6 +26,25 @@ public:
+@@ -27,6 +27,25 @@ public:
      bool IsActive() override;
  };
  
@@ -706,10 +787,10 @@ index 5077dda7..c1cb77f7 100644
  // (not when hiding in base because enemy has flag too)
  class PlayerHasFlag : public Trigger
 diff --git a/src/Ai/Base/TriggerContext.h b/src/Ai/Base/TriggerContext.h
-index 3b30691d..69407cff 100644
+index c823926..16f7d59 100644
 --- a/src/Ai/Base/TriggerContext.h
 +++ b/src/Ai/Base/TriggerContext.h
-@@ -88,6 +88,8 @@ public:
+@@ -89,6 +89,8 @@ public:
          creators["not dps aoe target active"] = &TriggerContext::not_dps_aoe_target_active;
          creators["has nearest adds"] = &TriggerContext::has_nearest_adds;
          creators["enemy player near"] = &TriggerContext::enemy_player_near;
@@ -718,7 +799,7 @@ index 3b30691d..69407cff 100644
  
          creators["tank assist"] = &TriggerContext::TankAssist;
          creators["lose aggro"] = &TriggerContext::LoseAggro;
-@@ -237,6 +239,8 @@ public:
+@@ -238,6 +240,8 @@ public:
          creators["wander random status"] = &TriggerContext::wander_random_status;
          creators["wander npc status"] = &TriggerContext::wander_npc_status;
          creators["do quest status"] = &TriggerContext::do_quest_status;
@@ -727,7 +808,7 @@ index 3b30691d..69407cff 100644
          creators["travel flight status"] = &TriggerContext::travel_flight_status;
          creators["outdoor pvp status"] = &TriggerContext::outdoor_pvp_status;
          creators["can self resurrect"] = &TriggerContext::can_self_resurrect;
-@@ -338,6 +342,8 @@ private:
+@@ -339,6 +343,8 @@ private:
      static Trigger* not_dps_aoe_target_active(PlayerbotAI* botAI) { return new NotDpsAoeTargetActiveTrigger(botAI); }
      static Trigger* has_nearest_adds(PlayerbotAI* botAI) { return new HasNearestAddsTrigger(botAI); }
      static Trigger* enemy_player_near(PlayerbotAI* botAI) { return new EnemyPlayerNear(botAI); }
@@ -736,7 +817,7 @@ index 3b30691d..69407cff 100644
      static Trigger* Random(PlayerbotAI* botAI) { return new RandomTrigger(botAI, "random", 20); }
      static Trigger* seldom(PlayerbotAI* botAI) { return new RandomTrigger(botAI, "seldom", 300); }
      static Trigger* often(PlayerbotAI* botAI) { return new RandomTrigger(botAI, "often", 5); }
-@@ -451,6 +457,8 @@ private:
+@@ -452,6 +458,8 @@ private:
      static Trigger* wander_random_status(PlayerbotAI* botAI) { return new NewRpgStatusTrigger(botAI, RPG_WANDER_RANDOM); }
      static Trigger* wander_npc_status(PlayerbotAI* botAI) { return new NewRpgStatusTrigger(botAI, RPG_WANDER_NPC); }
      static Trigger* do_quest_status(PlayerbotAI* botAI) { return new NewRpgStatusTrigger(botAI, RPG_DO_QUEST); }
@@ -746,10 +827,10 @@ index 3b30691d..69407cff 100644
      static Trigger* outdoor_pvp_status(PlayerbotAI* botAI) { return new NewRpgStatusTrigger(botAI, RPG_OUTDOOR_PVP); }
      static Trigger* can_self_resurrect(PlayerbotAI* ai) { return new SelfResurrectTrigger(ai); }
 diff --git a/src/Ai/Base/Value/LeastHpTargetValue.cpp b/src/Ai/Base/Value/LeastHpTargetValue.cpp
-index d8579f0d..dd21bbc9 100644
+index 2459c56..1a7b0cd 100644
 --- a/src/Ai/Base/Value/LeastHpTargetValue.cpp
 +++ b/src/Ai/Base/Value/LeastHpTargetValue.cpp
-@@ -6,6 +6,8 @@
+@@ -7,6 +7,8 @@
  #include "LeastHpTargetValue.h"
  
  #include "AttackersValue.h"
@@ -758,7 +839,7 @@ index d8579f0d..dd21bbc9 100644
  #include "Playerbots.h"
  
  class FindLeastHpTargetStrategy : public FindNonCcTargetStrategy
-@@ -32,3 +34,52 @@ Unit* LeastHpTargetValue::Calculate()
+@@ -33,3 +35,52 @@ Unit* LeastHpTargetValue::Calculate()
  
      return FindTarget(&strategy);
  }
@@ -812,10 +893,10 @@ index d8579f0d..dd21bbc9 100644
 +    return best;
 +}
 diff --git a/src/Ai/Base/Value/LeastHpTargetValue.h b/src/Ai/Base/Value/LeastHpTargetValue.h
-index 5f7b2c74..fe441514 100644
+index d7444f6..3212972 100644
 --- a/src/Ai/Base/Value/LeastHpTargetValue.h
 +++ b/src/Ai/Base/Value/LeastHpTargetValue.h
-@@ -19,4 +19,15 @@ public:
+@@ -20,4 +20,15 @@ public:
      Unit* Calculate() override;
  };
  
@@ -832,10 +913,10 @@ index 5f7b2c74..fe441514 100644
 +
  #endif
 diff --git a/src/Ai/Base/ValueContext.h b/src/Ai/Base/ValueContext.h
-index 39262102..0f9983cb 100644
+index 12a7c6f..aa6da80 100644
 --- a/src/Ai/Base/ValueContext.h
 +++ b/src/Ai/Base/ValueContext.h
-@@ -259,6 +259,7 @@ public:
+@@ -261,6 +261,7 @@ public:
          creators["bg master"] = &ValueContext::bg_master;
          creators["enemy flag carrier"] = &ValueContext::enemy_fc;
          creators["team flag carrier"] = &ValueContext::team_fc;
@@ -843,7 +924,7 @@ index 39262102..0f9983cb 100644
  
          creators["home bind"] = &ValueContext::home_bind;
          creators["last long move"] = &ValueContext::last_long_move;
-@@ -511,6 +512,7 @@ private:
+@@ -514,6 +515,7 @@ private:
      static UntypedValue* rpg_bg_type(PlayerbotAI* botAI) { return new RpgBgTypeValue(botAI); }
      static UntypedValue* team_fc(PlayerbotAI* botAI) { return new FlagCarrierValue(botAI, true, true); }
      static UntypedValue* enemy_fc(PlayerbotAI* botAI) { return new FlagCarrierValue(botAI, false, true); }
@@ -852,10 +933,10 @@ index 39262102..0f9983cb 100644
      static UntypedValue* last_long_move(PlayerbotAI* botAI) { return new LastLongMoveValue(botAI); }
      static UntypedValue* home_bind(PlayerbotAI* botAI) { return new HomeBindValue(botAI); }
 diff --git a/src/Ai/Base/WorldPacketActionContext.h b/src/Ai/Base/WorldPacketActionContext.h
-index 9aa7eeaf..b4f2b4b2 100644
+index f94ed6e..2fbf04d 100644
 --- a/src/Ai/Base/WorldPacketActionContext.h
 +++ b/src/Ai/Base/WorldPacketActionContext.h
-@@ -103,6 +103,7 @@ public:
+@@ -104,6 +104,7 @@ public:
          creators["bg join"] = &WorldPacketActionContext::bg_join;
          creators["bg leave"] = &WorldPacketActionContext::bg_leave;
          creators["arena tactics"] = &WorldPacketActionContext::arena_tactics;
@@ -863,7 +944,7 @@ index 9aa7eeaf..b4f2b4b2 100644
          creators["petition sign"] = &WorldPacketActionContext::petition_sign;
          creators["lfg join"] = &WorldPacketActionContext::lfg_join;
          creators["lfg accept"] = &WorldPacketActionContext::lfg_accept;
-@@ -169,6 +170,7 @@ private:
+@@ -170,6 +171,7 @@ private:
      static Action* bg_status_check(PlayerbotAI* botAI) { return new BGStatusCheckAction(botAI); }
      static Action* bg_strategy_check(PlayerbotAI* botAI) { return new BGStrategyCheckAction(botAI); }
      static Action* arena_tactics(PlayerbotAI* botAI) { return new ArenaTactics(botAI); }
@@ -872,7 +953,7 @@ index 9aa7eeaf..b4f2b4b2 100644
      static Action* lfg_teleport(PlayerbotAI* botAI) { return new LfgTeleportAction(botAI); }
      static Action* lfg_leave(PlayerbotAI* botAI) { return new LfgLeaveAction(botAI); }
 diff --git a/src/Ai/World/Rpg/Action/NewRpgBaseAction.cpp b/src/Ai/World/Rpg/Action/NewRpgBaseAction.cpp
-index e67a1c7c..8c8720f0 100644
+index f1eb0d7..78e0e80 100644
 --- a/src/Ai/World/Rpg/Action/NewRpgBaseAction.cpp
 +++ b/src/Ai/World/Rpg/Action/NewRpgBaseAction.cpp
 @@ -22,6 +22,7 @@
@@ -998,10 +1079,10 @@ index e67a1c7c..8c8720f0 100644
      {
          case RPG_WANDER_RANDOM:
 diff --git a/src/Ai/World/Rpg/Action/RpgSubActions.cpp b/src/Ai/World/Rpg/Action/RpgSubActions.cpp
-index 24d03b7f..749cbd58 100644
+index b7ac200..4aeff43 100644
 --- a/src/Ai/World/Rpg/Action/RpgSubActions.cpp
 +++ b/src/Ai/World/Rpg/Action/RpgSubActions.cpp
-@@ -5,6 +5,12 @@
+@@ -6,6 +6,12 @@
  
  #include "RpgSubActions.h"
  
@@ -1014,7 +1095,7 @@ index 24d03b7f..749cbd58 100644
  #include "BudgetValues.h"
  #include "ChooseRpgTargetAction.h"
  #include "EmoteAction.h"
-@@ -508,3 +514,129 @@ bool RpgMountAnimAction::Execute(Event /*event*/)
+@@ -509,3 +515,129 @@ bool RpgMountAnimAction::Execute(Event /*event*/)
  
      return true;
  }
@@ -1145,10 +1226,10 @@ index 24d03b7f..749cbd58 100644
 +    return listed > 0;
 +}
 diff --git a/src/Ai/World/Rpg/Action/RpgSubActions.h b/src/Ai/World/Rpg/Action/RpgSubActions.h
-index 95bcac6e..c9f3e6ea 100644
+index 31dea19..d6c9acf 100644
 --- a/src/Ai/World/Rpg/Action/RpgSubActions.h
 +++ b/src/Ai/World/Rpg/Action/RpgSubActions.h
-@@ -160,6 +160,19 @@ private:
+@@ -161,6 +161,19 @@ private:
      std::string const ActionName() override;
  };
  
@@ -1169,10 +1250,10 @@ index 95bcac6e..c9f3e6ea 100644
  {
  public:
 diff --git a/src/Ai/World/Rpg/Strategy/NewRpgStrategy.cpp b/src/Ai/World/Rpg/Strategy/NewRpgStrategy.cpp
-index 521b15c3..260ed1e3 100644
+index 3658aa8..0a2de17 100644
 --- a/src/Ai/World/Rpg/Strategy/NewRpgStrategy.cpp
 +++ b/src/Ai/World/Rpg/Strategy/NewRpgStrategy.cpp
-@@ -73,6 +73,24 @@ void NewRpgStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+@@ -74,6 +74,24 @@ void NewRpgStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
              }
          )
      );
@@ -1198,7 +1279,7 @@ index 521b15c3..260ed1e3 100644
  
  void NewRpgStrategy::InitMultipliers(std::vector<Multiplier*>&)
 diff --git a/src/Ai/World/Rpg/Trigger/NewRpgTrigger.cpp b/src/Ai/World/Rpg/Trigger/NewRpgTrigger.cpp
-index 65e78eb4..3d916de6 100644
+index 65e78eb..3d916de 100644
 --- a/src/Ai/World/Rpg/Trigger/NewRpgTrigger.cpp
 +++ b/src/Ai/World/Rpg/Trigger/NewRpgTrigger.cpp
 @@ -1,4 +1,29 @@
@@ -1232,7 +1313,7 @@ index 65e78eb4..3d916de6 100644
 +    return roll_chance_f(sPlayerbotAIConfig.botAhSellChance);
 +}
 diff --git a/src/Ai/World/Rpg/Trigger/NewRpgTriggers.h b/src/Ai/World/Rpg/Trigger/NewRpgTriggers.h
-index 15b2243d..37c701df 100644
+index 15b2243..37c701d 100644
 --- a/src/Ai/World/Rpg/Trigger/NewRpgTriggers.h
 +++ b/src/Ai/World/Rpg/Trigger/NewRpgTriggers.h
 @@ -17,4 +17,24 @@ protected:
@@ -1261,10 +1342,10 @@ index 15b2243d..37c701df 100644
 +
  #endif
 diff --git a/src/Bot/Factory/AiFactory.cpp b/src/Bot/Factory/AiFactory.cpp
-index dfbe1f96..0750915c 100644
+index c895385..d659c0e 100644
 --- a/src/Bot/Factory/AiFactory.cpp
 +++ b/src/Bot/Factory/AiFactory.cpp
-@@ -482,7 +482,9 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
+@@ -483,7 +483,9 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
          if (player->InArena())
          {
              engine->addStrategy("arena", false);
@@ -1275,9 +1356,725 @@ index dfbe1f96..0750915c 100644
          }
          else
              engine->addStrategiesNoInit("boost", "racials", "chat", "default", "aoe", "potions", "cast time", "dps assist", nullptr);
+diff --git a/src/Bot/Factory/DungeonCompanions.cpp b/src/Bot/Factory/DungeonCompanions.cpp
+new file mode 100644
+index 0000000..8125a0d
+--- /dev/null
++++ b/src/Bot/Factory/DungeonCompanions.cpp
+@@ -0,0 +1,586 @@
++/*
++ * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license, you may redistribute it
++ * and/or modify it under version 3 of the License, or (at your option), any later version.
++ */
++
++#include "DungeonCompanions.h"
++
++#include "AiFactory.h"
++#include "Common.h"
++#include "Config.h"
++#include "DBCStores.h"
++#include "DatabaseEnv.h"
++#include "Group.h"
++#include "GroupMgr.h"
++#include "GroupScript.h"
++#include "LFGMgr.h"
++#include "Log.h"
++#include "ObjectAccessor.h"
++#include "Opcodes.h"
++#include "Player.h"
++#include "PlayerScript.h"
++#include "Playerbots.h"
++#include "PlayerbotMgr.h"
++#include "Random.h"
++#include "RandomPlayerbotMgr.h"
++#include "SharedDefines.h"
++#include "Timer.h"
++#include "WorldPacket.h"
++#include "WorldSession.h"
++
++#include <algorithm>
++#include <string>
++#include <vector>
++
++using namespace lfg;
++
++// Provided by mod-ollama-chat (same binary), weakly optional. When the chat
++// module is absent or sentiment tracking is off, GetSentiment returns the
++// negative sentinel and Nudge/Speak are no-ops. Same bridge pattern the guild
++// factories and PvP-respect system use.
++[[gnu::weak]] float OllamaChat_GetSentiment(Player* bot, Player* player);
++[[gnu::weak]] void OllamaChat_NudgeSentiment(Player* bot, Player* player, float delta);
++[[gnu::weak]] void OllamaChat_SpeakSituation(Player* bot, Player* target, std::string const& situation, bool whisper);
++
++namespace
++{
++    // ---- Config (read live, same idiom as the sibling factories) -----------
++    bool AfEnabled() { return sConfigMgr->GetOption<bool>("AiPlayerbot.DungeonAutofill.Enabled", true); }
++    uint32 AfIntervalSec() { return sConfigMgr->GetOption<uint32>("AiPlayerbot.DungeonAutofill.IntervalSec", 10); }
++    uint32 AfPlayerCooldownSec() { return sConfigMgr->GetOption<uint32>("AiPlayerbot.DungeonAutofill.PlayerCooldownSec", 20); }
++    int32 AfLevelSpread() { return sConfigMgr->GetOption<int32>("AiPlayerbot.DungeonAutofill.LevelSpread", 4); }
++
++    bool DcEnabled() { return sConfigMgr->GetOption<bool>("AiPlayerbot.DungeonCompanion.Enabled", true); }
++    float DcGoodThreshold() { return sConfigMgr->GetOption<float>("AiPlayerbot.DungeonCompanion.GoodThreshold", 0.65f); }
++    float DcTrollThreshold() { return sConfigMgr->GetOption<float>("AiPlayerbot.DungeonCompanion.TrollThreshold", 0.20f); }
++    uint32 DcMinMinutes() { return sConfigMgr->GetOption<uint32>("AiPlayerbot.DungeonCompanion.MinMinutes", 8); }
++    float DcCompletionNudge() { return sConfigMgr->GetOption<float>("AiPlayerbot.DungeonCompanion.CompletionNudge", 0.15f); }
++    float DcDeathNudge() { return sConfigMgr->GetOption<float>("AiPlayerbot.DungeonCompanion.DeathNudge", 0.04f); }
++    uint32 DcResolveIntervalSec() { return sConfigMgr->GetOption<uint32>("AiPlayerbot.DungeonCompanion.ResolveIntervalSec", 30); }
++
++    void Nudge(Player* bot, Player* player, float delta)
++    {
++        if (OllamaChat_NudgeSentiment && delta != 0.0f)
++            OllamaChat_NudgeSentiment(bot, player, delta);
++    }
++
++    void Speak(Player* bot, Player* target, std::string const& situation, bool whisper)
++    {
++        if (OllamaChat_SpeakSituation)
++            OllamaChat_SpeakSituation(bot, target, situation, whisper);
++    }
++
++    bool IsBot(Player* p) { return p && sPlayerbotsMgr.GetPlayerbotAI(p) != nullptr; }
++
++    // A candidate's natural LFG role, mirroring LfgJoinAction::GetRoles' random-bot
++    // branch (spec-tab -> role). Keeps autofill comps sensible (tank/heal/dps).
++    uint32 BotRoleMask(Player* bot)
++    {
++        uint8 spec = AiFactory::GetPlayerSpecTab(bot);
++        switch (bot->getClass())
++        {
++            case CLASS_DRUID:
++                if (spec == 2)
++                    return PLAYER_ROLE_HEALER;
++                if (spec == 1 && bot->HasAura(16931) /* thick hide */)
++                    return PLAYER_ROLE_TANK;
++                return PLAYER_ROLE_DAMAGE;
++            case CLASS_PALADIN:
++                if (spec == 1)
++                    return PLAYER_ROLE_TANK;
++                if (!spec)
++                    return PLAYER_ROLE_HEALER;
++                return PLAYER_ROLE_DAMAGE;
++            case CLASS_PRIEST:
++                return spec != 2 ? PLAYER_ROLE_HEALER : PLAYER_ROLE_DAMAGE;
++            case CLASS_SHAMAN:
++                return spec == 2 ? PLAYER_ROLE_HEALER : PLAYER_ROLE_DAMAGE;
++            case CLASS_WARRIOR:
++                return spec == 2 ? PLAYER_ROLE_TANK : PLAYER_ROLE_DAMAGE;
++            case CLASS_DEATH_KNIGHT:
++                return spec == 0 ? PLAYER_ROLE_TANK : PLAYER_ROLE_DAMAGE;
++            default:
++                return PLAYER_ROLE_DAMAGE;
++        }
++    }
++
++    // The subset of `selected` (the real player's queued dungeon values) that this
++    // bot is level-eligible for, normalised to raw dungeon IDs. Same normalisation
++    // + level gate LfgJoinAction applies, so the queued packet is well-formed. The
++    // low 3 bytes strip the LFG type bits so LookupEntry resolves the entry.
++    std::vector<uint32> BotValidDungeons(Player* bot, LfgDungeonSet const& selected)
++    {
++        std::vector<uint32> out;
++        uint32 const botLevel = bot->GetLevel();
++        for (uint32 value : selected)
++        {
++            LFGDungeonEntry const* dungeon = sLFGDungeonStore.LookupEntry(value & 0x00FFFFFF);
++            if (!dungeon || (dungeon->TypeID != LFG_TYPE_RANDOM && dungeon->TypeID != LFG_TYPE_DUNGEON &&
++                             dungeon->TypeID != LFG_TYPE_HEROIC && dungeon->TypeID != LFG_TYPE_RAID))
++                continue;
++            if (dungeon->MinLevel && (botLevel < dungeon->MinLevel || botLevel > dungeon->MaxLevel))
++                continue;
++            if (botLevel > uint32(dungeon->MinLevel) + 10 && dungeon->TypeID == LFG_TYPE_DUNGEON)
++                continue;
++            out.push_back(dungeon->ID);
++        }
++        return out;
++    }
++
++    // Queue `bot` into the dungeon-finder for `dungeons` as `roleMask`, using the
++    // exact CMSG_LFG_JOIN packet form LfgJoinAction::JoinLFG uses (JoinLfg itself
++    // is not thread-safe, so we push a packet onto the bot's session instead).
++    void QueueBotForDungeons(Player* bot, std::vector<uint32> const& dungeons, uint32 roleMask)
++    {
++        if (dungeons.empty() || !bot->GetSession())
++            return;
++
++        PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
++        std::string const gs = botAI ? std::to_string(botAI->GetEquipGearScore(bot)) : "0";
++
++        WorldPacket* data = new WorldPacket(CMSG_LFG_JOIN);
++        *data << (uint32)roleMask;
++        *data << (bool)false;
++        *data << (bool)false;
++        *data << (uint8)(dungeons.size());
++        for (uint32 dungeon : dungeons)
++            *data << (uint32)dungeon;
++        *data << (uint8)3 << (uint8)0 << (uint8)0 << (uint8)0;  // needs
++        *data << gs;
++        bot->GetSession()->QueuePacket(data);
++    }
++
++    // Is this random bot free to be pulled into a player's dungeon queue right now?
++    bool AutofillCandidate(Player* bot, Player* player, int32 levelSpread)
++    {
++        if (!bot || bot == player || !bot->IsInWorld() || bot->IsBeingTeleported())
++            return false;
++        if (!sRandomPlayerbotMgr.IsRandomBot(bot))
++            return false;
++        if (bot->GetTeamId() != player->GetTeamId())
++            return false;
++        if (bot->GetLevel() < 15)
++            return false;
++        if (bot->isDead() || bot->IsInCombat())
++            return false;
++        if (bot->GetGroup() || bot->InBattleground() || bot->InBattlegroundQueue())
++            return false;
++        if (Map* map = bot->GetMap())
++            if (map->Instanceable())
++                return false;
++        if (sLFGMgr->GetState(bot->GetGUID()) != LFG_STATE_NONE)
++            return false;
++        // Keep the queued crew near the player's level so the core accepts the join.
++        int32 const diff = int32(bot->GetLevel()) - int32(player->GetLevel());
++        if (diff < -levelSpread || diff > levelSpread)
++            return false;
++        return true;
++    }
++}  // namespace
++
++DungeonCompanions& DungeonCompanions::instance()
++{
++    static DungeonCompanions instance;
++    return instance;
++}
++
++void DungeonCompanions::EnsureLoaded()
++{
++    {
++        std::lock_guard<std::mutex> lock(_mutex);
++        if (_loaded)
++            return;
++        _loaded = true;
++    }
++
++    // Guard against the table not existing yet (module SQL not applied).
++    if (!CharacterDatabase.Query("SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() "
++                                 "AND TABLE_NAME = 'mod_playerbots_companions'"))
++    {
++        LOG_INFO("playerbots", "[DungeonCompanions] companions table absent; persistence idle until SQL applies");
++        return;
++    }
++
++    uint32 count = 0;
++    if (QueryResult result = CharacterDatabase.Query("SELECT bot_guid FROM mod_playerbots_companions"))
++    {
++        std::lock_guard<std::mutex> lock(_mutex);
++        do
++        {
++            _companions.insert((*result)[0].Get<uint32>());
++            ++count;
++        } while (result->NextRow());
++    }
++    LOG_INFO("playerbots", "[DungeonCompanions] loaded {} persistent companion(s)", count);
++}
++
++bool DungeonCompanions::IsCompanion(ObjectGuid::LowType botLow)
++{
++    if (!_loaded)
++        EnsureLoaded();
++    std::lock_guard<std::mutex> lock(_mutex);
++    return _companions.find(botLow) != _companions.end();
++}
++
++void DungeonCompanions::OnPartyChanged(Group* group)
++{
++    if (!DcEnabled() || !group)
++        return;
++
++    // Qualify the group and snapshot its real player + random-bot members.
++    ObjectGuid playerGuid;
++    std::vector<ObjectGuid> botGuids;
++    for (auto const& slot : group->GetMemberSlots())
++    {
++        Player* member = ObjectAccessor::FindPlayer(slot.guid);
++        if (!member)
++            continue;
++        if (!IsBot(member))
++            playerGuid = member->GetGUID();
++        else if (sRandomPlayerbotMgr.IsRandomBot(member))
++            botGuids.push_back(member->GetGUID());
++    }
++
++    ObjectGuid const key = group->GetGUID();
++    bool const qualifies = playerGuid && !botGuids.empty();
++
++    std::lock_guard<std::mutex> lock(_mutex);
++    auto it = _runs.find(key);
++    if (qualifies)
++    {
++        RunState& run = (it == _runs.end()) ? _runs[key] : it->second;
++        if (run.startMs == 0)
++        {
++            run.startMs = getMSTime();
++            run.playerGuid = playerGuid;
++        }
++        // Accumulate bots - remember everyone who was ever part of the run, even
++        // members who later drop, so they still get judged at the end.
++        for (ObjectGuid const& g : botGuids)
++            run.botGuids.insert(g);
++    }
++    else if (it != _runs.end() && !it->second.resolved)
++    {
++        // Stopped qualifying (player left, or all bots gone) -> the run is over.
++        // Defer the (heavier, DB/LLM-touching) resolve to the next world tick so
++        // this GroupScript hook never does it while holding the lock.
++        _pendingResolve.push_back(std::move(it->second));
++        _runs.erase(it);
++    }
++}
++
++void DungeonCompanions::OnPartyDisband(ObjectGuid groupGuid)
++{
++    if (!DcEnabled())
++        return;
++
++    std::lock_guard<std::mutex> lock(_mutex);
++    auto it = _runs.find(groupGuid);
++    if (it == _runs.end() || it->second.resolved)
++        return;
++    RunState run = it->second;
++    _runs.erase(it);
++    _pendingResolve.push_back(std::move(run));
++}
++
++void DungeonCompanions::OnMemberDeath(Player* member)
++{
++    if (!DcEnabled() || !member)
++        return;
++
++    Group* group = member->GetGroup();
++    if (!group)
++        return;
++
++    std::lock_guard<std::mutex> lock(_mutex);
++    auto it = _runs.find(group->GetGUID());
++    if (it != _runs.end() && !it->second.resolved)
++        ++it->second.deaths;
++}
++
++void DungeonCompanions::Update(uint32 diff)
++{
++    EnsureLoaded();
++
++    // 1) every tick, latch "this run zoned into a dungeon" for live runs. Done
++    // continuously (not just on the 30s sweep) so a run that ends via disband /
++    // player-leave BEFORE a sweep still carries the flag when it resolves.
++    {
++        std::lock_guard<std::mutex> lock(_mutex);
++        for (auto& kv : _runs)
++        {
++            if (kv.second.entered)
++                continue;
++            if (Player* p = ObjectAccessor::FindPlayer(kv.second.playerGuid))
++                if (p->IsInWorld() && p->GetMap() && p->GetMap()->IsDungeon())
++                    kv.second.entered = true;
++        }
++    }
++
++    // 2) drain any runs that ended since the last tick (resolved off-lock).
++    std::vector<RunState> toResolve;
++    {
++        std::lock_guard<std::mutex> lock(_mutex);
++        toResolve.swap(_pendingResolve);
++    }
++    for (RunState& run : toResolve)
++        ResolveRun(run);
++
++    // 3) reap runs whose group vanished without a disband hook, resolving them.
++    _resolveAccumMs += diff;
++    if (_resolveAccumMs >= DcResolveIntervalSec() * IN_MILLISECONDS)
++    {
++        _resolveAccumMs = 0;
++        ResolveStaleRuns();
++    }
++
++    // 4) autofill queued players.
++    if (AfEnabled())
++    {
++        _autofillAccumMs += diff;
++        if (_autofillAccumMs >= std::max<uint32>(1, AfIntervalSec()) * IN_MILLISECONDS)
++        {
++            _autofillAccumMs = 0;
++            AutofillTick();
++        }
++    }
++}
++
++void DungeonCompanions::ResolveStaleRuns()
++{
++    std::vector<RunState> toResolve;
++    {
++        std::lock_guard<std::mutex> lock(_mutex);
++        for (auto it = _runs.begin(); it != _runs.end();)
++        {
++            Group* group = sGroupMgr->GetGroupByGUID(it->first.GetCounter());
++            if (!group && !it->second.resolved)
++            {
++                toResolve.push_back(it->second);  // group vanished without a disband hook
++                it = _runs.erase(it);
++                continue;
++            }
++            ++it;
++        }
++    }
++    for (RunState& run : toResolve)
++        ResolveRun(run);
++}
++
++void DungeonCompanions::ResolveRun(RunState& run)
++{
++    if (run.startMs == 0 || run.botGuids.empty())
++        return;
++
++    // Only a run that actually zoned into a dungeon produces companions - merely
++    // queuing and cancelling leaves the bots as throwaway pool bots.
++    if (!run.entered)
++        return;
++
++    Player* player = ObjectAccessor::FindPlayer(run.playerGuid);
++    if (!player)
++        return;
++
++    uint32 const minMs = DcMinMinutes() * MINUTE * IN_MILLISECONDS;
++    bool const longEnough = (getMSTime() - run.startMs) >= minMs;
++    float const goodThreshold = DcGoodThreshold();
++    float const trollThreshold = DcTrollThreshold();
++
++    // Run-outcome nudge, applied per bot before we read the resulting standing:
++    // a clean, long-enough run rewards; each death penalises. This is what lets a
++    // single memorable run push a bot across the friend / troll line.
++    float outcome = 0.0f;
++    if (longEnough)
++        outcome += DcCompletionNudge();
++    outcome -= DcDeathNudge() * float(run.deaths);
++
++    uint32 friends = 0, trolls = 0;
++    for (ObjectGuid const& botGuid : run.botGuids)
++    {
++        Player* bot = ObjectAccessor::FindPlayer(botGuid);
++        if (!bot || !sRandomPlayerbotMgr.IsRandomBot(bot))
++            continue;
++        if (IsCompanion(botGuid.GetCounter()))
++            continue;  // already a saved companion
++
++        if (outcome != 0.0f)
++            Nudge(bot, player, outcome);
++
++        float const sentiment = OllamaChat_GetSentiment ? OllamaChat_GetSentiment(bot, player) : -1.0f;
++        if (sentiment < 0.0f)
++            continue;  // sentiment unavailable (chat module off) - stay ephemeral
++
++        if (sentiment >= goodThreshold)
++        {
++            SaveCompanion(bot, player, DISPOSITION_FRIEND, sentiment);
++            Speak(bot, player, "you had a great dungeon run together and want to keep adventuring with them", true);
++            ++friends;
++        }
++        else if (sentiment <= trollThreshold)
++        {
++            SaveCompanion(bot, player, DISPOSITION_TROLL, sentiment);
++            // A troll sticks around to keep being a nuisance - no friendly line.
++            ++trolls;
++        }
++        // else neutral: not saved; returns to the random pool as normal.
++    }
++
++    if (friends || trolls)
++        LOG_INFO("playerbots", "[DungeonCompanions] run for {} ended ({} deaths, {}): +{} friend(s) +{} troll(s)",
++                 player->GetName(), run.deaths, longEnough ? "completed" : "short", friends, trolls);
++}
++
++void DungeonCompanions::SaveCompanion(Player* bot, Player* player, uint8 disposition, float sentiment)
++{
++    ObjectGuid::LowType const botLow = bot->GetGUID().GetCounter();
++    {
++        std::lock_guard<std::mutex> lock(_mutex);
++        if (!_companions.insert(botLow).second)
++            return;  // raced - already saved
++    }
++
++    CharacterDatabase.Execute(
++        "INSERT INTO mod_playerbots_companions (bot_guid, player_guid, disposition, sentiment) VALUES ({}, {}, {}, {:.3f}) "
++        "ON DUPLICATE KEY UPDATE player_guid = VALUES(player_guid), disposition = VALUES(disposition), "
++        "sentiment = VALUES(sentiment)",
++        botLow, player->GetGUID().GetCounter(), uint32(disposition), sentiment);
++
++    LOG_INFO("playerbots", "[DungeonCompanions] {} <{}> saved as {} of {} (sentiment {:.2f})",
++             bot->GetName(), botLow, disposition == DISPOSITION_TROLL ? "TROLL" : "FRIEND", player->GetName(), sentiment);
++}
++
++void DungeonCompanions::AutofillTick()
++{
++    int32 const levelSpread = std::max<int32>(1, AfLevelSpread());
++    uint32 const cooldownMs = AfPlayerCooldownSec() * IN_MILLISECONDS;
++    uint32 const now = getMSTime();
++
++    HashMapHolder<Player>::MapType const& players = ObjectAccessor::GetPlayers();
++    for (auto const& kv : players)
++    {
++        Player* player = kv.second;
++        if (!player || !player->IsInWorld() || IsBot(player))
++            continue;  // real players only
++
++        // Act once per queue via the queue owner (solo player or group leader).
++        Group* group = player->GetGroup();
++        if (group && group->GetLeaderGUID() != player->GetGUID())
++            continue;
++
++        // LFG state + selection live under the GROUP guid when grouped, else the
++        // player guid. Must be actively queued (not yet matched into a proposal).
++        ObjectGuid const queueGuid = group ? group->GetGUID() : player->GetGUID();
++        if (sLFGMgr->GetState(queueGuid) != LFG_STATE_QUEUED)
++            continue;
++
++        uint32 const have = group ? group->GetMembersCount() : 1;
++        if (have >= 5)
++            continue;
++
++        // Per-player cooldown so we top the queue up gently, not every tick.
++        ObjectGuid::LowType const pLow = player->GetGUID().GetCounter();
++        {
++            std::lock_guard<std::mutex> lock(_mutex);
++            auto it = _lastFill.find(pLow);
++            if (it != _lastFill.end() && now - it->second < cooldownMs)
++                continue;
++            _lastFill[pLow] = now;
++        }
++
++        LfgDungeonSet const selected = sLFGMgr->GetSelectedDungeons(queueGuid);
++        if (selected.empty())
++            continue;
++
++        // Gather free, level-appropriate random bots split by natural role.
++        std::vector<Player*> tanks, heals, dps;
++        for (auto const& bkv : sRandomPlayerbotMgr.GetAllBots())
++        {
++            Player* bot = bkv.second;
++            if (!AutofillCandidate(bot, player, levelSpread))
++                continue;
++            if (BotValidDungeons(bot, selected).empty())
++                continue;
++            uint32 const rm = BotRoleMask(bot);
++            if (rm & PLAYER_ROLE_TANK)
++                tanks.push_back(bot);
++            else if (rm & PLAYER_ROLE_HEALER)
++                heals.push_back(bot);
++            else
++                dps.push_back(bot);
++        }
++
++        // Build the fill list: prefer a full tank/heal/dps comp for the missing
++        // slots, falling back to whatever is available.
++        uint32 need = 5 - have;
++        std::vector<std::pair<Player*, uint32>> toQueue;  // bot -> role
++        auto take = [&](std::vector<Player*>& pool, uint32 role)
++        {
++            if (need == 0 || pool.empty())
++                return;
++            toQueue.emplace_back(pool.back(), role);
++            pool.pop_back();
++            --need;
++        };
++
++        take(tanks, PLAYER_ROLE_TANK);
++        take(heals, PLAYER_ROLE_HEALER);
++        while (need > 0 && !dps.empty())
++            take(dps, PLAYER_ROLE_DAMAGE);
++        // If we still need bodies, backfill from leftover tanks/heals as DPS.
++        while (need > 0 && !tanks.empty())
++            take(tanks, PLAYER_ROLE_DAMAGE);
++        while (need > 0 && !heals.empty())
++            take(heals, PLAYER_ROLE_DAMAGE);
++
++        for (auto const& tq : toQueue)
++            QueueBotForDungeons(tq.first, BotValidDungeons(tq.first, selected), tq.second);
++
++        if (!toQueue.empty())
++            LOG_INFO("playerbots", "[DungeonAutofill] queued {} bot(s) to fill {}'s dungeon ({} needed)",
++                     toQueue.size(), player->GetName(), 5 - have);
++    }
++}
++
++// ---------------------------------------------------------------------------
++// Scripts that feed the singleton. The GroupScript tracks dungeon-party
++// membership; the PlayerScript counts member deaths. Empty enabled-hook lists
++// (all hooks on) mirror the sibling PartyGuildFormation scripts.
++// ---------------------------------------------------------------------------
++class DungeonCompanionsGroupScript : public GroupScript
++{
++public:
++    DungeonCompanionsGroupScript() : GroupScript("DungeonCompanionsGroupScript") {}
++
++    void OnCreate(Group* group, Player* /*leader*/) override { DungeonCompanions::instance().OnPartyChanged(group); }
++
++    void OnAddMember(Group* group, ObjectGuid /*guid*/) override
++    {
++        DungeonCompanions::instance().OnPartyChanged(group);
++    }
++
++    void OnRemoveMember(Group* group, ObjectGuid /*guid*/, RemoveMethod /*method*/, ObjectGuid /*kicker*/,
++                        char const* /*reason*/) override
++    {
++        DungeonCompanions::instance().OnPartyChanged(group);
++    }
++
++    void OnDisband(Group* group) override
++    {
++        if (group)
++            DungeonCompanions::instance().OnPartyDisband(group->GetGUID());
++    }
++};
++
++class DungeonCompanionsPlayerScript : public PlayerScript
++{
++public:
++    DungeonCompanionsPlayerScript() : PlayerScript("DungeonCompanionsPlayerScript") {}
++
++    void OnPlayerJustDied(Player* player) override { DungeonCompanions::instance().OnMemberDeath(player); }
++};
++
++void AddSC_DungeonCompanions()
++{
++    new DungeonCompanionsGroupScript();
++    new DungeonCompanionsPlayerScript();
++}
+diff --git a/src/Bot/Factory/DungeonCompanions.h b/src/Bot/Factory/DungeonCompanions.h
+new file mode 100644
+index 0000000..93c5cad
+--- /dev/null
++++ b/src/Bot/Factory/DungeonCompanions.h
+@@ -0,0 +1,118 @@
++/*
++ * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license, you may redistribute it
++ * and/or modify it under version 3 of the License, or (at your option), any later version.
++ */
++
++#ifndef PLAYERBOTS_DUNGEONCOMPANIONS_H
++#define PLAYERBOTS_DUNGEONCOMPANIONS_H
++
++#include "ObjectGuid.h"
++
++#include <map>
++#include <mutex>
++#include <set>
++#include <unordered_set>
++#include <vector>
++
++class Group;
++class Player;
++
++// Dungeon autofill + experience-based companion persistence.
++//
++// AUTOFILL (AiPlayerbot.DungeonAutofill.*)
++//   A world-thread tick keeps every real player's dungeon-finder queue fed with
++//   role/level-appropriate random bots, so a queued dungeon ALWAYS fills instead
++//   of waiting for the vanilla matchmaker to happen to have the right bots queued.
++//   It reuses the exact CMSG_LFG_JOIN mechanism the module's LfgJoinAction uses
++//   (queue a bot for the player's selected dungeons with a chosen role); the core
++//   LFG matcher then forms the group. Self-healing: if a tick doesn't form the
++//   group it simply re-evaluates and tops the queue up again next tick.
++//
++// PERSISTENCE (AiPlayerbot.DungeonCompanion.*)
++//   Every dungeon RUN - a group holding a real player and >= 1 random bot that
++//   actually zones into an instance - is tracked. When the run ends (the player
++//   leaves / the group disbands), each participating random bot is judged by its
++//   live mod-ollama-chat sentiment toward the player, after a run-outcome nudge
++//   (a clean completed run raises it, deaths lower it):
++//     - GOOD experience  (sentiment >= GoodThreshold)  -> saved as a "friend"
++//     - very BAD          (sentiment <= TrollThreshold) -> saved as a "troll"
++//     - NEUTRAL in between                              -> NOT saved; the bot
++//       stays a throwaway random-pool bot (instance-only, re-randomised as usual)
++//   Saved companions are persisted to acore_characters.mod_playerbots_companions
++//   and excluded from the random-bot RE-RANDOMISE churn in RandomPlayerbotMgr, so
++//   they keep their name/level/gear identity and can be run into again out in the
++//   world - the memorable ones (loved OR hated) stick around; the forgettable
++//   ones don't.
++//
++// All state lives in a single world-thread-driven singleton. The GroupScript and
++// PlayerScript that feed it are registered from AddPlayerbotsScripts().
++class DungeonCompanions
++{
++public:
++    static DungeonCompanions& instance();
++
++    enum Disposition : uint8
++    {
++        DISPOSITION_FRIEND = 1,
++        DISPOSITION_TROLL  = 2,
++    };
++
++    // Load persisted companion guids once (lazy, on the first world tick).
++    void EnsureLoaded();
++
++    // True if this bot (low guid) is a saved companion. RandomPlayerbotMgr calls
++    // this to skip re-randomising the bot so its identity is preserved. O(log n),
++    // lock-guarded; safe to call from the world thread every process pass.
++    bool IsCompanion(ObjectGuid::LowType botLow);
++
++    // --- GroupScript feed (world thread) ---------------------------------
++    // (Re)register a group the moment it becomes a qualifying dungeon party;
++    // resolve + drop it once it stops qualifying (player left / bots all gone).
++    void OnPartyChanged(Group* group);
++    // Resolve + forget a disbanded group entirely.
++    void OnPartyDisband(ObjectGuid groupGuid);
++
++    // --- PlayerScript feed (world thread) --------------------------------
++    // Count a member death against the run the dead member belongs to.
++    void OnMemberDeath(Player* member);
++
++    // --- Driver -----------------------------------------------------------
++    // World-thread tick: autofill queued players + resolve finished/stale runs.
++    void Update(uint32 diff);
++
++private:
++    DungeonCompanions() = default;
++
++    struct RunState
++    {
++        ObjectGuid playerGuid;              // the real player the run belongs to
++        std::set<ObjectGuid> botGuids;      // every random bot ever seen in the run
++        uint32 startMs = 0;                 // getMSTime() when the run first qualified
++        uint32 deaths = 0;                  // member deaths during the run
++        bool entered = false;               // group actually zoned into an instance
++        bool resolved = false;              // classification already done
++    };
++
++    // Autofill: top up every queued real player's dungeon with random bots.
++    void AutofillTick();
++    // Resolve runs whose group is gone (completion / disband we didn't catch).
++    void ResolveStaleRuns();
++    // Judge each bot in a finished run and persist the memorable ones.
++    void ResolveRun(RunState& run);
++    void SaveCompanion(Player* bot, Player* player, uint8 disposition, float sentiment);
++
++    std::mutex _mutex;
++    std::map<ObjectGuid, RunState> _runs;             // group GUID -> tracked run
++    std::vector<RunState> _pendingResolve;            // runs whose group ended, awaiting resolve
++    std::set<ObjectGuid::LowType> _companions;        // saved companion low-guids
++    std::map<ObjectGuid::LowType, uint32> _lastFill;  // player low-guid -> last autofill ms
++    uint32 _autofillAccumMs = 0;
++    uint32 _resolveAccumMs = 0;
++    bool _loaded = false;
++};
++
++// Registration entry (AddSC-style): the GroupScript + PlayerScript feeds. Call
++// from AddPlayerbotsScripts().
++void AddSC_DungeonCompanions();
++
++#endif
 diff --git a/src/Bot/Factory/GuildRecruitmentEvent.cpp b/src/Bot/Factory/GuildRecruitmentEvent.cpp
 new file mode 100644
-index 00000000..8ca23285
+index 0000000..8ca2328
 --- /dev/null
 +++ b/src/Bot/Factory/GuildRecruitmentEvent.cpp
 @@ -0,0 +1,324 @@
@@ -1607,7 +2404,7 @@ index 00000000..8ca23285
 +}
 diff --git a/src/Bot/Factory/GuildRecruitmentEvent.h b/src/Bot/Factory/GuildRecruitmentEvent.h
 new file mode 100644
-index 00000000..d8c46e77
+index 0000000..d8c46e7
 --- /dev/null
 +++ b/src/Bot/Factory/GuildRecruitmentEvent.h
 @@ -0,0 +1,69 @@
@@ -1682,7 +2479,7 @@ index 00000000..d8c46e77
 +#endif
 diff --git a/src/Bot/Factory/OngoingGuildRecruit.cpp b/src/Bot/Factory/OngoingGuildRecruit.cpp
 new file mode 100644
-index 00000000..80aac54e
+index 0000000..80aac54
 --- /dev/null
 +++ b/src/Bot/Factory/OngoingGuildRecruit.cpp
 @@ -0,0 +1,352 @@
@@ -2040,7 +2837,7 @@ index 00000000..80aac54e
 +}
 diff --git a/src/Bot/Factory/OngoingGuildRecruit.h b/src/Bot/Factory/OngoingGuildRecruit.h
 new file mode 100644
-index 00000000..3f0d19ac
+index 0000000..3f0d19a
 --- /dev/null
 +++ b/src/Bot/Factory/OngoingGuildRecruit.h
 @@ -0,0 +1,54 @@
@@ -2100,7 +2897,7 @@ index 00000000..3f0d19ac
 +#endif
 diff --git a/src/Bot/Factory/PartyGuildFormation.cpp b/src/Bot/Factory/PartyGuildFormation.cpp
 new file mode 100644
-index 00000000..5ccce293
+index 0000000..5ccce29
 --- /dev/null
 +++ b/src/Bot/Factory/PartyGuildFormation.cpp
 @@ -0,0 +1,551 @@
@@ -2657,7 +3454,7 @@ index 00000000..5ccce293
 +}
 diff --git a/src/Bot/Factory/PartyGuildFormation.h b/src/Bot/Factory/PartyGuildFormation.h
 new file mode 100644
-index 00000000..1069007f
+index 0000000..1069007
 --- /dev/null
 +++ b/src/Bot/Factory/PartyGuildFormation.h
 @@ -0,0 +1,90 @@
@@ -2753,7 +3550,7 @@ index 00000000..1069007f
 +#endif
 diff --git a/src/Bot/Factory/PersonalityGuildFactory.cpp b/src/Bot/Factory/PersonalityGuildFactory.cpp
 new file mode 100644
-index 00000000..366bd357
+index 0000000..366bd35
 --- /dev/null
 +++ b/src/Bot/Factory/PersonalityGuildFactory.cpp
 @@ -0,0 +1,380 @@
@@ -3139,7 +3936,7 @@ index 00000000..366bd357
 +}
 diff --git a/src/Bot/Factory/PersonalityGuildFactory.h b/src/Bot/Factory/PersonalityGuildFactory.h
 new file mode 100644
-index 00000000..7bf85780
+index 0000000..7bf8578
 --- /dev/null
 +++ b/src/Bot/Factory/PersonalityGuildFactory.h
 @@ -0,0 +1,39 @@
@@ -3183,18 +3980,36 @@ index 00000000..7bf85780
 +
 +#endif
 diff --git a/src/Bot/RandomPlayerbotMgr.cpp b/src/Bot/RandomPlayerbotMgr.cpp
-index 5910c2f6..9e88e821 100644
+index 6abae47..655aab9 100644
 --- a/src/Bot/RandomPlayerbotMgr.cpp
 +++ b/src/Bot/RandomPlayerbotMgr.cpp
-@@ -40,6 +40,7 @@
+@@ -41,6 +41,8 @@
  #include "RaceMgr.h"
  #include "Random.h"
  #include "RandomPlayerbotFactory.h"
 +#include "PersonalityGuildFactory.h"
++#include "DungeonCompanions.h"
  #include "ServerFacade.h"
  #include "SharedDefines.h"
  #include "TravelMgr.h"
-@@ -2540,6 +2541,8 @@ void RandomPlayerbotMgr::OnBotLoginInternal(Player* const bot)
+@@ -1530,6 +1532,16 @@ bool RandomPlayerbotMgr::ProcessBot(Player* bot)
+             // }
+             // if (randomiser)
+             // {
++            // Persistent dungeon companions (a great or troll run made them
++            // memorable) keep their identity: skip the full re-roll and just push
++            // the randomise timer out so they stay in the world as themselves.
++            if (DungeonCompanions::instance().IsCompanion(botId))
++            {
++                uint32 skipTime = urand(sPlayerbotAIConfig.minRandomBotRandomizeTime,
++                                        sPlayerbotAIConfig.maxRandomBotRandomizeTime);
++                ScheduleRandomize(botId, skipTime);
++                return true;
++            }
+             Randomize(bot);
+             LOG_DEBUG("playerbots", "Bot #{} {}:{} <{}>: randomized", botId,
+                       bot->GetTeamId() == TEAM_ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName());
+@@ -2541,6 +2553,8 @@ void RandomPlayerbotMgr::OnBotLoginInternal(Player* const bot)
          if (playerBots.size() == sRandomPlayerbotMgr.GetMaxAllowedBotCount())
          {
              _isBotLogging = false;
@@ -3204,10 +4019,10 @@ index 5910c2f6..9e88e821 100644
      }
  
 diff --git a/src/PlayerbotAIConfig.cpp b/src/PlayerbotAIConfig.cpp
-index 37c74ac2..11c63372 100644
+index eef9bfc..941938e 100644
 --- a/src/PlayerbotAIConfig.cpp
 +++ b/src/PlayerbotAIConfig.cpp
-@@ -684,9 +684,45 @@ bool PlayerbotAIConfig::Initialize()
+@@ -712,9 +712,45 @@ bool PlayerbotAIConfig::Initialize()
      RpgStatusProbWeight[RPG_REST] = sConfigMgr->GetOption<int32>("AiPlayerbot.RpgStatusProbWeight.Rest", 5);
      RpgStatusProbWeight[RPG_OUTDOOR_PVP] = sConfigMgr->GetOption<int32>("AiPlayerbot.RpgStatusProbWeight.OutdoorPvp", 10);
  
@@ -3254,10 +4069,10 @@ index 37c74ac2..11c63372 100644
      randomBotArenaTeam2v2Count = sConfigMgr->GetOption<int32>("AiPlayerbot.RandomBotArenaTeam2v2Count", 10);
      randomBotArenaTeam3v3Count = sConfigMgr->GetOption<int32>("AiPlayerbot.RandomBotArenaTeam3v3Count", 10);
 diff --git a/src/PlayerbotAIConfig.h b/src/PlayerbotAIConfig.h
-index fa8a10de..eb47fb6f 100644
+index b01b5fd..d10eb96 100644
 --- a/src/PlayerbotAIConfig.h
 +++ b/src/PlayerbotAIConfig.h
-@@ -371,10 +371,22 @@ public:
+@@ -381,10 +381,22 @@ public:
      bool autoDoQuests;
      bool enableNewRpgStrategy;
      std::unordered_map<NewRpgStatus, uint32> RpgStatusProbWeight;
@@ -3281,34 +4096,37 @@ index fa8a10de..eb47fb6f 100644
      uint32 tweakValue;  // Debugging config
  
 diff --git a/src/Script/Playerbots.cpp b/src/Script/Playerbots.cpp
-index e9abd5b7..9974cb2b 100644
+index 70aaa2d..5d9e4ab 100644
 --- a/src/Script/Playerbots.cpp
 +++ b/src/Script/Playerbots.cpp
-@@ -33,6 +33,9 @@
+@@ -33,6 +33,10 @@
  #include "PlayerbotCommandScript.h"
  #include "cmath"
  #include "BattleGroundTactics.h"
 +#include "OngoingGuildRecruit.h"
 +#include "PartyGuildFormation.h"
 +#include "PersonalityGuildFactory.h"
++#include "DungeonCompanions.h"
  
  class PlayerbotsDatabaseScript : public DatabaseScript
  {
-@@ -380,6 +383,9 @@ public:
+@@ -380,6 +384,10 @@ public:
      {
          PlayerbotWorldThreadProcessor::instance().Update(diff);
          sRandomPlayerbotMgr.UpdateAI(diff);  // World thread only
 +        OngoingGuildRecruit::instance().Update(diff);            // World thread only
 +        PersonalityGuildFactory::UpdateEmergentFounding(diff);   // World thread only
 +        PartyGuildFormation::instance().Update(diff);            // World thread only
++        DungeonCompanions::instance().Update(diff);              // World thread only
      }
  };
  
-@@ -539,6 +545,7 @@ void AddPlayerbotsScripts()
+@@ -541,6 +549,8 @@ void AddPlayerbotsScripts()
      new PlayerbotsWorldScript();
      new PlayerbotsScript();
      new PlayerBotsBGScript();
 +    AddSC_PartyGuildFormation();
++    AddSC_DungeonCompanions();
      AddPlayerbotsSecureLoginScripts();
      AddPlayerbotsCommandscripts();
      PlayerBotsGuildValidationScript();
