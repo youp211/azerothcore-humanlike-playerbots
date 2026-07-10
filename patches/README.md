@@ -48,6 +48,12 @@ cd ../mod-playerbots && git diff > ../../../patches/mod-playerbots-playstyles.pa
   PvP resilience / solid-for-level) so bots don't nag geared players. How the
   bot uses it (gift, sales pitch, mockery, respect) is personality-driven and
   baked into the wow-chat fine-tune (see finetune/)
+- Sentiment bridges for mod-playerbots (2026-07-10): plain-extern
+  `OllamaChat_GetSentiment` / `OllamaChat_NudgeSentiment` in `handler.cpp` expose
+  the LIVE (bot→player) sentiment value and a direct nudge to the same binary, so
+  the dungeon-companion system can judge a run and reward/penalise it. Bound with
+  `[[gnu::weak]]` at the playerbots call sites (no-op when this module is absent /
+  sentiment tracking is off), same idiom as `OllamaChat_SpeakSituation`
 
 **mod-playerbots-playstyles.patch** — per-personality gameplay + arena coordination:
 
@@ -82,3 +88,25 @@ cd ../mod-playerbots && git diff > ../../../patches/mod-playerbots-playstyles.pa
   5-min retry on miss) and rolls activities from that profile's weights
 - Degrades gracefully: no playstyle column / no personality / chat module
   disabled → global weights, zero queries after the first probe
+
+*Dungeon autofill + companion persistence (2026-07-10):*
+- New self-contained subsystem `src/Bot/Factory/DungeonCompanions.{cpp,h}`
+  (world-thread singleton + one `GroupScript` + one `PlayerScript`, wired in
+  `Script/Playerbots.cpp` exactly like `PartyGuildFormation`)
+- **Autofill**: a world tick keeps every real player's dungeon-finder queue fed
+  with role/level-appropriate free random bots (a tank, a healer, then DPS),
+  queued for the player's selected dungeons via the same `CMSG_LFG_JOIN` packet
+  `LfgJoinAction` uses; the core LFG matcher then forms the group. Self-healing,
+  per-player cooldown. Conf: `AiPlayerbot.DungeonAutofill.*`
+- **Persistence**: every dungeon *run* (a group with the real player + ≥1 random
+  bot that actually zones into an instance) is tracked; at run end each bot is
+  judged by its live sentiment (via the ollama bridges above) after a run-outcome
+  nudge — good run → **friend**, very bad → **troll**, neutral → not saved.
+  Saved companions land in `acore_characters.mod_playerbots_companions`
+  (migration `data/sql/characters/base/2026_07_10_dungeon_companions.sql`) and are
+  excluded from the re-randomise churn in `RandomPlayerbotMgr::ProcessBot` (one
+  `IsCompanion` guard before `Randomize`), so they keep their identity and can be
+  met again. Conf: `AiPlayerbot.DungeonCompanion.*`
+- Degrades gracefully: no companions table → persistence idles (logged, retried
+  on next boot); chat module / sentiment off → no companions saved, autofill
+  unaffected

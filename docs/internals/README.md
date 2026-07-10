@@ -59,6 +59,7 @@ the three things that trip up every change:
 | 15 | [finetune-pipeline](15-finetune-pipeline.md) | Dataset generator, training, staged deploy gate |
 | 16 | [ops](16-ops.md) | reset-world, systemd, self-healing client launcher |
 | 17 | [pvp-respect](17-pvp-respect.md) | PvP kills/rescues/ganks move respect; personality-gated chatter |
+| 18 | [dungeon-companions](18-dungeon-companions.md) | Dungeon autofill + experience-based bot persistence (friend/troll) |
 
 ## The recurring patterns (learn these once)
 
